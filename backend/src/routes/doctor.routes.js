@@ -15,6 +15,8 @@ import {
   updateMeSchema,
 } from '../validators/doctor.validator.js';
 import * as doctorController from '../controllers/doctor.controller.js';
+import * as ratingController from '../controllers/rating.controller.js';
+import { doctorRatingsSchema } from '../validators/rating.validator.js';
 
 const router = Router();
 
@@ -34,6 +36,9 @@ router.patch(
 
 // Public single profile
 router.get('/:id', validate(doctorIdSchema), doctorController.getById);
+
+// Public list of a doctor's ratings
+router.get('/:id/ratings', validate(doctorRatingsSchema), ratingController.listForDoctor);
 
 // Admin approve/reject
 router.patch(

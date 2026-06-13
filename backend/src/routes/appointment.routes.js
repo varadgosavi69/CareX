@@ -12,7 +12,12 @@ import {
   appointmentIdSchema,
   updateStatusSchema,
 } from '../validators/appointment.validator.js';
+import {
+  createPrescriptionSchema,
+  prescriptionParamsSchema,
+} from '../validators/prescription.validator.js';
 import * as appointmentController from '../controllers/appointment.controller.js';
+import * as prescriptionController from '../controllers/prescription.controller.js';
 
 const router = Router();
 
@@ -42,6 +47,21 @@ router.patch(
   authorize(ROLES.DOCTOR, ROLES.ADMIN),
   validate(updateStatusSchema),
   appointmentController.updateStatus
+);
+
+// ── Prescriptions (nested under an appointment) ──
+router.post(
+  '/:id/prescription',
+  protect,
+  authorize(ROLES.DOCTOR),
+  validate(createPrescriptionSchema),
+  prescriptionController.create
+);
+router.get(
+  '/:id/prescription',
+  protect,
+  validate(prescriptionParamsSchema),
+  prescriptionController.get
 );
 
 export default router;

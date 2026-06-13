@@ -39,6 +39,15 @@ const normalizeError = (err) => {
     return ApiError.unauthorized('Token expired');
   }
 
+  // Multer upload errors (e.g. file too large, unexpected field).
+  if (err.name === 'MulterError') {
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'File is too large (max 5 MB)'
+        : `Upload error: ${err.message}`;
+    return ApiError.badRequest(message);
+  }
+
   // Fallback: treat as an unexpected 500.
   return new ApiError(err.statusCode || 500, err.message || 'Internal server error');
 };
