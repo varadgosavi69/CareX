@@ -46,6 +46,13 @@ const appointmentSchema = new mongoose.Schema(
       required: [true, 'Slot is required'],
       trim: true,
     },
+    // Fee snapshot taken from the doctor at booking time so historical
+    // appointments keep the price that applied when they were booked.
+    consultationFee: {
+      type: Number,
+      min: [0, 'Consultation fee cannot be negative'],
+      default: 0,
+    },
     status: {
       type: String,
       enum: APPOINTMENT_STATUS_VALUES,
