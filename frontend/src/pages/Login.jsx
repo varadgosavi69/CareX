@@ -1,25 +1,10 @@
 import React, { useState } from 'react';
-import {
-    signInWithEmailAndPassword,
-    createUserWithEmailAndPassword,
-    updateProfile,
-} from 'firebase/auth';
-import { auth } from '../firebase';
+import { useAuth } from '../context/AuthContext';
+import { apiErrorMessage } from '../api/client';
 import { Heart, Mail, Lock, AlertCircle, X, Cloud, User, UserPlus, LogIn } from 'lucide-react';
 
-const AUTH_ERRORS = {
-    'auth/user-not-found': 'No account found with this email.',
-    'auth/wrong-password': 'Incorrect password. Please try again.',
-    'auth/invalid-email': 'Please enter a valid email address.',
-    'auth/invalid-credential': 'Invalid email or password.',
-    'auth/too-many-requests': 'Too many failed attempts. Please try again later.',
-    'auth/user-disabled': 'This account has been disabled.',
-    'auth/network-request-failed': 'Network error. Please check your connection.',
-    'auth/email-already-in-use': 'An account with this email already exists.',
-    'auth/weak-password': 'Password must be at least 6 characters.',
-};
-
 export default function Login() {
+    const { login, register } = useAuth();
     const [mode, setMode] = useState('login'); // 'login' | 'signup'
 
     // Login fields
@@ -46,9 +31,10 @@ export default function Login() {
         if (!email || !password) { setError('Please enter both email and password.'); return; }
         setLoading(true); setError('');
         try {
-            await signInWithEmailAndPassword(auth, email, password);
+            await login(email, password);
+            // On success, AuthProvider sets the user and PublicRoute redirects.
         } catch (err) {
-            setError(AUTH_ERRORS[err.code] || `Authentication failed: ${err.message}`);
+            setError(apiErrorMessage(err, 'Invalid email or password.'));
         } finally { setLoading(false); }
     };
 
@@ -57,13 +43,13 @@ export default function Login() {
         if (!fullName.trim()) { setError('Please enter your full name.'); return; }
         if (!email || !password) { setError('Please fill in all fields.'); return; }
         if (password !== confirmPassword) { setError('Passwords do not match.'); return; }
-        if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+        if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
         setLoading(true); setError('');
         try {
-            const cred = await createUserWithEmailAndPassword(auth, email, password);
-            await updateProfile(cred.user, { displayName: fullName.trim() });
+            await register({ name: fullName.trim(), email, password });
+            // On success, AuthProvider sets the user and PublicRoute redirects.
         } catch (err) {
-            setError(AUTH_ERRORS[err.code] || `Sign up failed: ${err.message}`);
+            setError(apiErrorMessage(err, 'Sign up failed. Please try again.'));
         } finally { setLoading(false); }
     };
 
@@ -203,7 +189,7 @@ export default function Login() {
                             <div style={{ position: 'relative' }}>
                                 <div style={iconStyle}><Lock size={18} /></div>
                                 <input type="password" value={password} onChange={e => setPassword(e.target.value)}
-                                    placeholder="At least 6 characters" required style={inputStyle} autoComplete="new-password" />
+                                    placeholder="At least 8 characters" required style={inputStyle} autoComplete="new-password" />
                             </div>
                         </div>
                         <div className="form-group">
@@ -230,7 +216,7 @@ export default function Login() {
                 }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '4px' }}>
                         <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#4CAF50' }} />
-                        <span style={{ fontSize: '12px', color: '#475569', fontWeight: 600 }}>Secure Firebase Authentication</span>
+                        <span style={{ fontSize: '12px', color: '#475569', fontWeight: 600 }}>Secure JWT Authentication</span>
                     </div>
                     <p style={{ fontSize: '11px', color: '#64748B' }}>
                         Your data is protected with enterprise-grade encryption
