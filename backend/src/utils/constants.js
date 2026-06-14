@@ -58,6 +58,25 @@ export const PAYMENT_TXN_STATUS = Object.freeze({
 });
 export const PAYMENT_TXN_STATUS_VALUES = Object.values(PAYMENT_TXN_STATUS);
 
+// Stable, machine-readable error codes returned alongside every error response
+// so the frontend can branch on a code instead of parsing human messages.
+// Keyed by HTTP status; keep this the single source of truth for error codes.
+export const ERROR_CODES = Object.freeze({
+  400: 'BAD_REQUEST',
+  401: 'UNAUTHORIZED',
+  403: 'FORBIDDEN',
+  404: 'NOT_FOUND',
+  409: 'CONFLICT',
+  413: 'PAYLOAD_TOO_LARGE',
+  429: 'TOO_MANY_REQUESTS',
+  500: 'INTERNAL_ERROR',
+  503: 'SERVICE_UNAVAILABLE',
+});
+
+// Resolve a status code to its stable error code, with a sensible fallback.
+export const errorCodeFor = (statusCode) =>
+  ERROR_CODES[statusCode] || (statusCode >= 500 ? 'INTERNAL_ERROR' : 'ERROR');
+
 // Days of the week used for doctor availability slots.
 export const WEEKDAYS = Object.freeze([
   'Monday',

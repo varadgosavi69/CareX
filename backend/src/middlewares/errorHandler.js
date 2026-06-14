@@ -6,6 +6,7 @@ import mongoose from 'mongoose';
 import ApiError from '../utils/ApiError.js';
 import logger from '../utils/logger.js';
 import { env } from '../config/env.js';
+import { errorCodeFor } from '../utils/constants.js';
 
 // Translate common non-ApiError failures into clean, client-safe ApiErrors.
 const normalizeError = (err) => {
@@ -66,6 +67,8 @@ const errorHandler = (err, req, res, _next) => {
   const body = {
     success: false,
     message: apiError.message,
+    // Stable, machine-readable code so clients branch on this, not the message.
+    code: errorCodeFor(apiError.statusCode),
     data: null,
   };
 

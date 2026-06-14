@@ -9,13 +9,13 @@ import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import mongoSanitize from 'express-mongo-sanitize';
 import hpp from 'hpp';
-import rateLimit from 'express-rate-limit';
 
 import { env } from './config/env.js';
 import { morganStream } from './utils/logger.js';
 import apiRoutes from './routes/index.js';
 import notFound from './middlewares/notFound.js';
 import errorHandler from './middlewares/errorHandler.js';
+import { globalLimiter } from './middlewares/rateLimiter.js';
 
 const app = express();
 
@@ -48,14 +48,7 @@ if (!env.isTest) {
   app.use(morgan(env.isProd ? 'combined' : 'dev', { stream: morganStream }));
 }
 
-// ── Global baseline rate limit (tighter per-route limits added later) ──
-const globalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 300, // requests per window per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'Too many requests, please try again later.', data: null },
-});
+// ── Global baseline rate limit (auth endpoints get a tighter limiter) ──
 app.use('/api', globalLimiter);
 
 // ── Routes ──
