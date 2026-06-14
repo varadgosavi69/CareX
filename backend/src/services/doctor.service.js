@@ -14,6 +14,14 @@ const OWNER_USER_FIELDS = 'name email phone role';
 // Escape user input before using it in a regex (prevents ReDoS / injection).
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// Earth's radius in km, for $centerSphere radius-in-radians conversion.
+const EARTH_RADIUS_KM = 6378.1;
+
+// Convert a { lat, lng, address } input into a GeoJSON Point ([lng, lat]) for
+// storage. Returns undefined when no location was provided.
+const toGeoPoint = (loc) =>
+  loc ? { type: 'Point', coordinates: [loc.lng, loc.lat], address: loc.address } : undefined;
+
 /**
  * Register a new doctor: creates a User(role=doctor) and a pending Doctor
  * profile. Public endpoint — the account stays hidden until an admin approves.
@@ -28,6 +36,7 @@ export const registerDoctor = async ({
   experienceYears,
   consultationFee,
   availability,
+  location,
 }) => {
   const existing = await User.findOne({ email });
   if (existing) throw ApiError.conflict('Email is already registered');
@@ -48,6 +57,7 @@ export const registerDoctor = async ({
       experienceYears,
       consultationFee,
       availability,
+      location: toGeoPoint(location),
       status: DOCTOR_STATUS.PENDING,
     });
 
@@ -63,9 +73,18 @@ export const registerDoctor = async ({
  * List APPROVED doctors with optional specialty/search filters and pagination.
  * Uses an aggregation so we can search across the linked user's name as well.
  */
-export const listApprovedDoctors = async ({ specialty, search, page, limit }) => {
+export const listApprovedDoctors = async ({ specialty, search, page, limit, near, radius }) => {
   const match = { status: DOCTOR_STATUS.APPROVED };
   if (specialty) match.specialty = specialty;
+
+  // "Doctors near me": limit to within `radius` km of the given lat,lng using
+  // the 2dsphere index. $geoWithin/$centerSphere takes a radius in radians.
+  if (near) {
+    const [lat, lng] = near.split(',').map((n) => Number(n.trim()));
+    match.location = {
+      $geoWithin: { $centerSphere: [[lng, lat], radius / EARTH_RADIUS_KM] },
+    };
+  }
 
   const pipeline = [
     { $match: match },
@@ -116,6 +135,10 @@ export const listApprovedDoctors = async ({ specialty, search, page, limit }) =>
             ratingCount: 1,
             status: 1,
             createdAt: 1,
+            location: 1,
+            // Convenience lat/lng for the frontend map (GeoJSON is [lng, lat]).
+            lng: { $arrayElemAt: ['$location.coordinates', 0] },
+            lat: { $arrayElemAt: ['$location.coordinates', 1] },
             'user._id': 1,
             'user.name': 1,
           },
@@ -187,6 +210,7 @@ export const updateOwnProfile = async (userId, updates) => {
   for (const key of allowed) {
     if (updates[key] !== undefined) doctor[key] = updates[key];
   }
+  if (updates.location !== undefined) doctor.location = toGeoPoint(updates.location);
 
   await doctor.save();
   return Doctor.findById(doctor._id).populate('user', OWNER_USER_FIELDS);

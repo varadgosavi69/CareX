@@ -12,6 +12,7 @@
     "start": "node src/server.js",
     "test": "cross-env NODE_ENV=test NODE_OPTIONS=--experimental-vm-modules MONGOMS_VERSION=7.0.14 MONGOMS_MD5_CHECK=0 jest --runInBand",
     "seed:admin": "node src/seed/admin.seed.js",
+    "seed:doctors": "node src/seed/doctors.seed.js",
     "lint": "echo \"No linter configured yet (placeholder)\" && exit 0"
   },
   "keywords": [

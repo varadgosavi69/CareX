@@ -9,6 +9,20 @@ import {
   WEEKDAYS,
 } from '../utils/constants.js';
 
+// GeoJSON Point for a doctor's clinic location. Coordinates are [lng, lat]
+// (GeoJSON order). Optional — a doctor may register before setting a location.
+const geoPointSchema = new mongoose.Schema(
+  {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: {
+      type: [Number], // [longitude, latitude]
+      required: true,
+    },
+    address: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 // A single recurring availability window, e.g. Monday 09:00–13:00.
 const availabilitySchema = new mongoose.Schema(
   {
@@ -61,6 +75,11 @@ const doctorSchema = new mongoose.Schema(
       type: [availabilitySchema],
       default: [],
     },
+    // Optional clinic location (GeoJSON Point). Absent until the doctor sets it.
+    location: {
+      type: geoPointSchema,
+      default: undefined,
+    },
     status: {
       type: String,
       enum: DOCTOR_STATUS_VALUES,
@@ -84,6 +103,21 @@ const doctorSchema = new mongoose.Schema(
 
 // Fast directory queries: list approved doctors filtered by specialty.
 doctorSchema.index({ status: 1, specialty: 1 });
+// Geospatial index for "doctors near me" queries.
+doctorSchema.index({ location: '2dsphere' });
+
+// Expose convenience lat/lng on serialized docs so the frontend map can pin a
+// doctor without knowing GeoJSON's [lng, lat] ordering. Existing fields are kept.
+doctorSchema.set('toJSON', {
+  transform: (_doc, ret) => {
+    const coords = ret.location?.coordinates;
+    if (Array.isArray(coords) && coords.length === 2) {
+      ret.lng = coords[0];
+      ret.lat = coords[1];
+    }
+    return ret;
+  },
+});
 
 const Doctor = mongoose.model('Doctor', doctorSchema);
 

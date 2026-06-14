@@ -24,6 +24,16 @@ const availabilityItem = z
     path: ['endTime'],
   });
 
+// Frontend-friendly location input ({ lat, lng, address }); the service stores
+// it as a GeoJSON Point. Coordinates are validated to real-world bounds.
+const location = z
+  .object({
+    lat: z.coerce.number().min(-90).max(90),
+    lng: z.coerce.number().min(-180).max(180),
+    address: z.string().trim().max(300).optional(),
+  })
+  .optional();
+
 // POST /api/doctors/register
 export const registerDoctorSchema = z.object({
   body: z.object({
@@ -36,14 +46,21 @@ export const registerDoctorSchema = z.object({
     experienceYears: z.coerce.number().int().min(0).max(80).optional(),
     consultationFee: z.coerce.number().min(0).max(1_000_000).optional(),
     availability: z.array(availabilityItem).max(50).optional(),
+    location,
   }),
 });
 
-// GET /api/doctors  (filters + pagination)
+// GET /api/doctors  (filters + pagination + optional "near" geo filter)
 export const listDoctorsSchema = z.object({
   query: z.object({
     specialty: z.enum(SPECIALTIES).optional(),
     search: z.string().trim().min(1).max(100).optional(),
+    // "lat,lng" — when present, results are limited to within `radius` km.
+    near: z
+      .string()
+      .regex(/^-?\d+(\.\d+)?,\s*-?\d+(\.\d+)?$/, 'near must be "lat,lng"')
+      .optional(),
+    radius: z.coerce.number().min(0.1).max(500).default(10), // km
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(50).default(10),
   }),
@@ -70,6 +87,7 @@ export const updateMeSchema = z.object({
       consultationFee: z.coerce.number().min(0).max(1_000_000).optional(),
       qualifications: z.string().trim().max(500).optional(),
       experienceYears: z.coerce.number().int().min(0).max(80).optional(),
+      location,
     })
     .refine((obj) => Object.keys(obj).length > 0, {
       message: 'Provide at least one field to update',
