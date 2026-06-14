@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import * as appointmentService from '../api/services/appointmentService';
 import {
     Heart, CalendarPlus, ClipboardList, AlertTriangle, LogOut,
     UserCircle, Stethoscope, Brain, Lightbulb, Sun, Coffee, Moon,
-    CalendarDays, Clock, CheckCircle, Loader2
+    CalendarDays, Clock, CheckCircle, XCircle, Loader2
 } from 'lucide-react';
 
 const navItems = [
@@ -28,30 +27,38 @@ function getGreeting() {
 
 function GreetingBanner({ user }) {
     const { text, icon } = getGreeting();
-    const displayName = user?.displayName || user?.email?.split('@')[0] || 'User';
+    const displayName = user?.name || user?.email?.split('@')[0] || 'User';
     const firstName = displayName.split(' ')[0];
 
-    const [stats, setStats] = useState({ total: 0, upcoming: 0, pending: 0, approved: 0 });
+    const [stats, setStats] = useState({ total: 0, upcoming: 0, completed: 0, cancelled: 0 });
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         if (!user) return;
+        let active = true;
         const load = async () => {
             try {
-                const q = query(collection(db, 'Appointments'), where('userId', '==', user.uid));
-                const snap = await getDocs(q);
-                const docs = snap.docs.map(d => d.data());
-                const today = new Date().toISOString().split('T')[0];
+                // Fetch the patient's appointments and derive the banner stats.
+                const { appointments } = await appointmentService.list({ limit: 50 });
+                if (!active) return;
+                const now = Date.now();
+                const isFuture = (a) => new Date(a.scheduledAt).getTime() >= now;
                 setStats({
-                    total: docs.length,
-                    upcoming: docs.filter(d => d.status === 'Approved' && d.date >= today).length,
-                    pending: docs.filter(d => d.status === 'Pending').length,
-                    approved: docs.filter(d => d.status === 'Approved').length,
+                    total: appointments.length,
+                    upcoming: appointments.filter(
+                        a => (a.status === 'pending' || a.status === 'approved') && isFuture(a)
+                    ).length,
+                    completed: appointments.filter(a => a.status === 'completed').length,
+                    cancelled: appointments.filter(a => a.status === 'cancelled').length,
                 });
-            } catch { }
-            finally { setLoading(false); }
+            } catch {
+                // Leave zeros on failure — the banner still renders cleanly.
+            } finally {
+                if (active) setLoading(false);
+            }
         };
         load();
+        return () => { active = false; };
     }, [user]);
 
     return (
@@ -80,8 +87,8 @@ function GreetingBanner({ user }) {
                 ) : [
                     { label: 'Total Appointments', value: stats.total, icon: <CalendarDays size={16} color="white" /> },
                     { label: 'Upcoming', value: stats.upcoming, icon: <Clock size={16} color="white" /> },
-                    { label: 'Approved', value: stats.approved, icon: <CheckCircle size={16} color="white" /> },
-                    { label: 'Pending Review', value: stats.pending, icon: <ClipboardList size={16} color="white" /> },
+                    { label: 'Completed', value: stats.completed, icon: <CheckCircle size={16} color="white" /> },
+                    { label: 'Cancelled', value: stats.cancelled, icon: <XCircle size={16} color="white" /> },
                 ].map(s => (
                     <div key={s.label} style={{
                         background: 'rgba(255,255,255,0.12)', borderRadius: 12,
@@ -106,11 +113,11 @@ export default function Dashboard() {
         navigate('/');
     };
 
-    const initials = user?.displayName
-        ? user.displayName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+    const initials = user?.name
+        ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
         : user?.email?.[0]?.toUpperCase() ?? 'U';
 
-    const displayName = user?.displayName || user?.email?.split('@')[0] || 'User';
+    const displayName = user?.name || user?.email?.split('@')[0] || 'User';
 
     return (
         <div className="dashboard">
