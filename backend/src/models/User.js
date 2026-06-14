@@ -4,9 +4,36 @@
 
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import { ROLE_VALUES, ROLES } from '../utils/constants.js';
+import { ROLE_VALUES, ROLES, GENDERS, BLOOD_GROUPS } from '../utils/constants.js';
 
 const SALT_ROUNDS = 12;
+
+// Emergency contact for a patient. All parts optional.
+const emergencyContactSchema = new mongoose.Schema(
+  {
+    name: { type: String, trim: true, maxlength: 100 },
+    phone: { type: String, trim: true, maxlength: 20 },
+    relation: { type: String, trim: true, maxlength: 50 },
+  },
+  { _id: false }
+);
+
+// Embedded medical/demographic profile for patients. Every field is optional;
+// these are sensitive health fields — only ever returned to the owner.
+const patientProfileSchema = new mongoose.Schema(
+  {
+    dateOfBirth: { type: Date },
+    gender: { type: String, enum: GENDERS },
+    bloodGroup: { type: String, enum: BLOOD_GROUPS },
+    height: { type: Number, min: [0, 'Height cannot be negative'] }, // cm
+    weight: { type: Number, min: [0, 'Weight cannot be negative'] }, // kg
+    allergies: { type: [String], default: undefined },
+    chronicConditions: { type: [String], default: undefined },
+    address: { type: String, trim: true, maxlength: 300 },
+    emergencyContact: { type: emergencyContactSchema },
+  },
+  { _id: false }
+);
 
 const userSchema = new mongoose.Schema(
   {
@@ -43,6 +70,10 @@ const userSchema = new mongoose.Schema(
     refreshToken: {
       type: String,
       select: false,
+    },
+    // Optional embedded medical profile (patients). Sensitive — owner-only.
+    patientProfile: {
+      type: patientProfileSchema,
     },
   },
   {

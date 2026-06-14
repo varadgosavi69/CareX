@@ -77,6 +77,12 @@ export const ERROR_CODES = Object.freeze({
 export const errorCodeFor = (statusCode) =>
   ERROR_CODES[statusCode] || (statusCode >= 500 ? 'INTERNAL_ERROR' : 'ERROR');
 
+// Patient demographic enums (used by the embedded patientProfile).
+export const GENDERS = Object.freeze(['male', 'female', 'other']);
+export const BLOOD_GROUPS = Object.freeze([
+  'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-',
+]);
+
 // Days of the week used for doctor availability slots.
 export const WEEKDAYS = Object.freeze([
   'Monday',
