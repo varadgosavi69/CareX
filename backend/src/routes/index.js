@@ -9,6 +9,7 @@ import appointmentRoutes from './appointment.routes.js';
 import ratingRoutes from './rating.routes.js';
 import reportRoutes from './report.routes.js';
 import profileRoutes from './profile.routes.js';
+import paymentRoutes from './payment.routes.js';
 
 const router = Router();
 
@@ -19,5 +20,6 @@ router.use('/appointments', appointmentRoutes);
 router.use('/ratings', ratingRoutes);
 router.use('/reports', reportRoutes);
 router.use('/profile', profileRoutes);
+router.use('/payments', paymentRoutes);
 
 export default router;
