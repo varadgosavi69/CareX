@@ -270,7 +270,7 @@ export default function DoctorPanel() {
         if (isAuthorized) load();
     }, [isAuthorized, load]);
 
-    // Refetch when the window regains focus. NOTE: the live Firestore onSnapshot
+    // Refetch when the window regains focus. NOTE: the previous live real-time
     // listeners are intentionally replaced by fetch-on-mount + a Refresh button +
     // refocus refresh (same pattern as AppointmentHistory).
     useEffect(() => {
