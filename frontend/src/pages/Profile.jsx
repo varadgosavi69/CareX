@@ -1,16 +1,19 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { updateProfile } from 'firebase/auth';
-import { auth } from '../firebase';
+import * as profileService from '../api/services/profileService';
+import { apiErrorMessage } from '../api/client';
 import {
     User, Mail, Phone, Calendar, Droplets, MapPin, Heart,
-    AlertCircle, Edit3, Save, X, CheckCircle, ShieldPlus, UserCircle
+    AlertCircle, Edit3, Save, X, CheckCircle, ShieldPlus, UserCircle, Users
 } from 'lucide-react';
 
-const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'Unknown'];
-const GENDERS = ['Male', 'Female', 'Other', 'Prefer not to say'];
+// Display options. Blood groups match the API enum exactly; gender labels are
+// Title-case for display and mapped to the lowercase API enum on save.
+const BLOOD_GROUPS = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+const GENDER_OPTIONS = ['Male', 'Female', 'Other'];
+
+// 7–20 chars: digits, spaces, and + - ( ) separators (matches the API validator).
+const PHONE_RE = /^[0-9+\-\s()]{7,20}$/;
 
 const emptyProfile = {
     fullName: '',
@@ -19,20 +22,91 @@ const emptyProfile = {
     gender: '',
     mobile: '',
     address: '',
-    emergencyContact: '',
     emergencyName: '',
+    emergencyPhone: '',
+    emergencyRelation: '',
     allergies: '',
     medicalConditions: '',
-    insuranceId: '',
+};
+
+// ─── Mapping helpers: nested API patientProfile  <->  flat form fields ──────────
+const parseList = (s) => (s || '').split(',').map(x => x.trim()).filter(Boolean);
+const toListString = (arr) => (Array.isArray(arr) ? arr.join(', ') : '');
+const genderToApi = (label) => (label ? label.toLowerCase() : '');
+const genderToLabel = (api) => (api ? api.charAt(0).toUpperCase() + api.slice(1) : '');
+const dobToInput = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10); // YYYY-MM-DD
+};
+
+// Flatten the API user (+ embedded patientProfile) into the form's flat shape.
+const fromApi = (user) => {
+    const pp = user?.patientProfile || {};
+    const ec = pp.emergencyContact || {};
+    return {
+        fullName: user?.name || '',
+        dob: dobToInput(pp.dateOfBirth),
+        gender: genderToLabel(pp.gender),
+        mobile: user?.phone || '',
+        address: pp.address || '',
+        bloodGroup: pp.bloodGroup || '',
+        emergencyName: ec.name || '',
+        emergencyPhone: ec.phone || '',
+        emergencyRelation: ec.relation || '',
+        allergies: toListString(pp.allergies),
+        medicalConditions: toListString(pp.chronicConditions),
+    };
+};
+
+// Build the PUT payload (name/phone at top level, the rest under patientProfile
+// keys the backend deep-merges). Returns { payload } or { error } on bad input.
+const buildPayload = (d) => {
+    const payload = {};
+
+    const name = d.fullName.trim();
+    if (name) {
+        if (name.length < 2) return { error: 'Full name must be at least 2 characters.' };
+        payload.name = name;
+    }
+
+    const mobile = d.mobile.trim();
+    if (mobile) {
+        if (!PHONE_RE.test(mobile)) return { error: 'Mobile number is invalid (7–20 digits; + - ( ) allowed).' };
+        payload.phone = mobile;
+    }
+
+    if (d.dob) payload.dateOfBirth = d.dob;
+    if (d.gender) payload.gender = genderToApi(d.gender);
+    if (d.bloodGroup) payload.bloodGroup = d.bloodGroup;
+
+    payload.address = d.address.trim();
+    payload.allergies = parseList(d.allergies);
+    payload.chronicConditions = parseList(d.medicalConditions);
+
+    const ec = {};
+    const en = d.emergencyName.trim();
+    const ep = d.emergencyPhone.trim();
+    const er = d.emergencyRelation.trim();
+    if (en) ec.name = en;
+    if (ep) {
+        if (!PHONE_RE.test(ep)) return { error: 'Emergency contact number is invalid (7–20 digits; + - ( ) allowed).' };
+        ec.phone = ep;
+    }
+    if (er) ec.relation = er;
+    if (Object.keys(ec).length) payload.emergencyContact = ec;
+
+    return { payload };
 };
 
 export default function Profile() {
-    const { user } = useAuth();
+    const { user, setUser } = useAuth();
     const [profile, setProfile] = useState(emptyProfile);
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState(emptyProfile);
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState('');
     const [toast, setToast] = useState(null);
 
     const showToast = (message, type = 'success') => {
@@ -40,31 +114,23 @@ export default function Profile() {
         setTimeout(() => setToast(null), 3500);
     };
 
-    // Load profile from Firestore (with 3s timeout so page never stays stuck)
-    useEffect(() => {
-        if (!user) return;
-        const load = async () => {
-            const prefill = { ...emptyProfile, fullName: user.displayName || '' };
-            try {
-                const ref = doc(db, 'UserProfiles', user.uid);
-                const timeout = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('timeout')), 3000)
-                );
-                const snap = await Promise.race([getDoc(ref), timeout]);
-                if (snap.exists()) {
-                    setProfile({ ...emptyProfile, ...snap.data() });
-                } else {
-                    setProfile(prefill);
-                }
-            } catch {
-                // Firestore unavailable or timed out — show empty form pre-filled from Auth
-                setProfile(prefill);
-            } finally {
-                setLoading(false);
-            }
-        };
-        load();
+    // Load the profile from the REST API (GET /api/profile). The patientProfile
+    // is embedded in the returned user.
+    const load = useCallback(async () => {
+        setLoading(true);
+        setLoadError('');
+        try {
+            const { user: freshUser } = await profileService.get();
+            setProfile(fromApi(freshUser));
+        } catch (e) {
+            setLoadError(apiErrorMessage(e, 'Could not load your profile.'));
+            setProfile(fromApi(user)); // fall back to the identity from AuthContext
+        } finally {
+            setLoading(false);
+        }
     }, [user]);
+
+    useEffect(() => { load(); }, [load]);
 
     const handleEdit = () => {
         setDraft({ ...profile });
@@ -76,22 +142,23 @@ export default function Profile() {
         setDraft(emptyProfile);
     };
 
-    const handleSave = () => {
-        // ── Optimistic: update UI instantly ──
-        const saved = { ...draft };
-        setProfile(saved);
-        setEditing(false);
-        setSaving(false);
-        showToast('Profile saved!', 'success');
-
-        // ── Background: write to Firestore + Auth silently ──
-        const ref = doc(db, 'UserProfiles', user.uid);
-        setDoc(ref, { ...saved, updatedAt: new Date().toISOString() }, { merge: true })
-            .catch(() => { /* silently ignore */ });
-
-        if (saved.fullName && saved.fullName !== user.displayName) {
-            updateProfile(auth.currentUser, { displayName: saved.fullName })
-                .catch(() => { /* silently ignore */ });
+    // Save to PUT /api/profile, surfacing validation and request errors.
+    const handleSave = async () => {
+        const { payload, error } = buildPayload(draft);
+        if (error) { showToast(error, 'error'); return; }
+        setSaving(true);
+        try {
+            const updated = await profileService.update(payload);
+            const flat = fromApi(updated);
+            setProfile(flat);
+            setDraft(flat);
+            setEditing(false);
+            setUser(updated); // keep AuthContext (e.g. sidebar name) in sync
+            showToast('Profile saved!', 'success');
+        } catch (e) {
+            showToast(apiErrorMessage(e, 'Could not save profile.'), 'error');
+        } finally {
+            setSaving(false);
         }
     };
 
@@ -139,6 +206,13 @@ export default function Profile() {
             </div>
 
             <div className="page-body">
+                {loadError && (
+                    <div style={{ background: '#FFEBEE', border: '1px solid #EF9A9A', borderRadius: 10, padding: '12px 16px', marginBottom: 20, color: '#C62828', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                        <span>{loadError}</span>
+                        <button className="btn btn-outline btn-sm" onClick={load}>Retry</button>
+                    </div>
+                )}
+
                 {/* Profile Hero Card */}
                 <div className="profile-hero">
                     <div className="profile-avatar-ring">
@@ -189,7 +263,7 @@ export default function Profile() {
                             <ProfileField
                                 label="Gender" icon={<UserCircle size={15} />}
                                 value={val.gender} editing={editing} type="select"
-                                options={GENDERS} onChange={v => set('gender', v)}
+                                options={GENDER_OPTIONS} onChange={v => set('gender', v)}
                                 placeholder="Select gender"
                             />
                         </div>
@@ -239,19 +313,13 @@ export default function Profile() {
                                 label="Known Allergies" icon={<AlertCircle size={15} />}
                                 value={val.allergies} editing={editing} type="textarea"
                                 onChange={v => set('allergies', v)}
-                                placeholder="e.g. Penicillin, Peanuts, Latex"
+                                placeholder="Comma-separated, e.g. Penicillin, Peanuts, Latex"
                             />
                             <ProfileField
                                 label="Medical Conditions" icon={<ShieldPlus size={15} />}
                                 value={val.medicalConditions} editing={editing} type="textarea"
                                 onChange={v => set('medicalConditions', v)}
-                                placeholder="e.g. Diabetes, Hypertension"
-                            />
-                            <ProfileField
-                                label="Insurance ID" icon={<ShieldPlus size={15} />}
-                                value={val.insuranceId} editing={editing}
-                                onChange={v => set('insuranceId', v)}
-                                placeholder="Your health insurance ID"
+                                placeholder="Comma-separated, e.g. Diabetes, Hypertension"
                             />
                         </div>
                     </div>
@@ -271,9 +339,15 @@ export default function Profile() {
                             />
                             <ProfileField
                                 label="Contact Number" icon={<Phone size={15} />}
-                                value={val.emergencyContact} editing={editing} type="tel"
-                                onChange={v => set('emergencyContact', v)}
+                                value={val.emergencyPhone} editing={editing} type="tel"
+                                onChange={v => set('emergencyPhone', v)}
                                 placeholder="+91 XXXXXXXXXX"
+                            />
+                            <ProfileField
+                                label="Relationship" icon={<Users size={15} />}
+                                value={val.emergencyRelation} editing={editing}
+                                onChange={v => set('emergencyRelation', v)}
+                                placeholder="e.g. Spouse, Parent, Sibling"
                             />
                         </div>
                     </div>
