@@ -1,48 +1,74 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { useAuth } from '../context/AuthContext';
-import { db, storage } from '../firebase';
+import React, { useEffect, useState, useCallback } from 'react';
+import * as appointmentService from '../api/services/appointmentService';
+import * as reportService from '../api/services/reportService';
+import * as ratingService from '../api/services/ratingService';
+import * as prescriptionService from '../api/services/prescriptionService';
+import { apiErrorMessage } from '../api/client';
 import {
-    collection, query, where, orderBy, onSnapshot,
-    addDoc, serverTimestamp, updateDoc, doc, getDocs
-} from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import {
-    ClipboardList, CalendarDays, Clock, User, Stethoscope,
-    CheckCircle, X, Sparkles, XCircle, Star, FileText,
-    Upload, Eye, History, Activity, Filter,
-    Search as SearchIcon, Download, AlertCircle, Zap, TrendingUp
+    ClipboardList, X, XCircle, Star, FileText,
+    Upload, Eye, TrendingUp, RefreshCw,
+    Search as SearchIcon, Zap, Loader2, CheckCircle,
 } from 'lucide-react';
 
-const STATUS_STYLES = {
-    Approved: 'badge-approved',
-    Rejected: 'badge-rejected',
-    Pending: 'badge-pending',
-    Cancelled: 'badge-cancelled',
+// Status metadata keyed by the API's lowercase enum
+// (pending | approved | rejected | cancelled | completed).
+const STATUS_META = {
+    pending: { label: '⏳ Pending', badge: 'badge-pending', border: '#FFE082', bg: '#FFF8E1', txt: '#E65100', dot: '#E65100' },
+    approved: { label: '✓ Approved', badge: 'badge-approved', border: '#A5D6A7', bg: '#E8F5E9', txt: '#2E7D32', dot: '#2E7D32' },
+    completed: { label: '🏁 Completed', badge: 'badge-approved', border: '#A5D6A7', bg: '#E8F5E9', txt: '#2E7D32', dot: '#2E7D32' },
+    rejected: { label: '✗ Rejected', badge: 'badge-rejected', border: '#EF9A9A', bg: '#FFEBEE', txt: '#C62828', dot: '#C62828' },
+    cancelled: { label: '🚫 Cancelled', badge: 'badge-cancelled', border: '#E0E7FF', bg: '#F8FAFF', txt: '#64748B', dot: '#64748B' },
+};
+
+const metaFor = (status) => STATUS_META[status] || STATUS_META.pending;
+
+// Flatten a populated API appointment into the shape the UI renders.
+const normalizeAppt = (a) => {
+    const d = a.scheduledAt ? new Date(a.scheduledAt) : null;
+    const valid = d && !Number.isNaN(d.getTime());
+    return {
+        id: a._id,
+        status: a.status,
+        scheduledAt: a.scheduledAt,
+        date: valid ? d.toLocaleDateString('en-CA') : '', // YYYY-MM-DD (local)
+        time: a.slot || (valid ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''),
+        doctorId: a.doctor?._id,
+        doctorName: a.doctor?.user?.name || 'Doctor',
+        category: a.category || a.doctor?.specialty || '',
+        hospital: a.location?.address || '',
+        patientName: a.patient?.name || '',
+        reason: a.reason || '',
+        consultationFee: a.consultationFee,
+    };
 };
 
 // ─── Star Rating Component ────────────────────────────────────────────────────
-function StarRating({ doctorId, doctorName, category, existingRating, onRated }) {
+// One rating per appointment, only for COMPLETED appointments. Disables once
+// rated; a 409 from the API (already rated) is also treated as "done".
+function StarRating({ appointmentId, alreadyRated, onRated }) {
     const [hovered, setHovered] = useState(0);
-    const [selected, setSelected] = useState(existingRating || 0);
+    const [selected, setSelected] = useState(0);
     const [submitting, setSubmitting] = useState(false);
-    const [done, setDone] = useState(!!existingRating);
-    const { user } = useAuth();
+    const [done, setDone] = useState(!!alreadyRated);
+    const [error, setError] = useState('');
 
     const handleRate = async (stars) => {
-        if (done) return;
+        if (done || submitting) return;
         setSelected(stars);
         setSubmitting(true);
+        setError('');
         try {
-            await addDoc(collection(db, 'Ratings'), {
-                doctorId, doctorName, category,
-                patientId: user.uid, patientEmail: user.email,
-                rating: stars,
-                timestamp: serverTimestamp(),
-            });
+            await ratingService.create({ appointmentId, stars });
             setDone(true);
-            onRated && onRated(stars);
+            onRated?.(appointmentId, stars);
         } catch (e) {
-            console.error(e);
+            if (e?.response?.status === 409) {
+                // Already rated — enforce one-per-appointment client-side too.
+                setDone(true);
+                onRated?.(appointmentId, stars);
+            } else {
+                setError(apiErrorMessage(e, 'Could not submit rating'));
+            }
         } finally {
             setSubmitting(false);
         }
@@ -63,45 +89,26 @@ function StarRating({ doctorId, doctorName, category, existingRating, onRated })
     }
 
     return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12, color: '#64748B', marginRight: 4 }}>Rate:</span>
             {[1, 2, 3, 4, 5].map(i => (
                 <Star key={i} size={18}
                     style={{ cursor: submitting ? 'default' : 'pointer', transition: 'transform 0.1s' }}
                     fill={i <= (hovered || selected) ? '#F59E0B' : 'none'}
                     color={i <= (hovered || selected) ? '#F59E0B' : '#CBD5E1'}
-                    onMouseEnter={() => !done && setHovered(i)}
+                    onMouseEnter={() => setHovered(i)}
                     onMouseLeave={() => setHovered(0)}
                     onClick={() => handleRate(i)}
                 />
             ))}
             {submitting && <span style={{ fontSize: 11, color: '#94A3B8' }}>Saving…</span>}
-        </div>
-    );
-}
-
-// ─── Floating Approval Toast ─────────────────────────────────────────────────
-function ApprovalToast({ toasts, onDismiss }) {
-    return (
-        <div className="toast-container">
-            {toasts.map(t => (
-                <div key={t.id} className="toast-notification toast-approved">
-                    <CheckCircle size={20} style={{ flexShrink: 0, color: '#2E7D32' }} />
-                    <div className="toast-text">
-                        <strong>Appointment Approved!</strong>
-                        <p>{t.message}</p>
-                    </div>
-                    <button className="toast-close" onClick={() => onDismiss(t.id)}>
-                        <X size={16} />
-                    </button>
-                </div>
-            ))}
+            {error && <span style={{ fontSize: 11, color: '#C62828' }}>{error}</span>}
         </div>
     );
 }
 
 // ─── Cancel Confirm Modal ─────────────────────────────────────────────────────
-function CancelModal({ appt, onConfirm, onClose, cancelling }) {
+function CancelModal({ appt, onConfirm, onClose, cancelling, error }) {
     if (!appt) return null;
     return (
         <div className="modal-overlay" onClick={onClose}>
@@ -118,6 +125,11 @@ function CancelModal({ appt, onConfirm, onClose, cancelling }) {
                         <strong>{appt.doctorName}</strong> on <strong>{appt.date}</strong> at{' '}
                         <strong>{appt.time}</strong>?
                     </p>
+                    {error && (
+                        <div style={{ background: '#FFEBEE', color: '#C62828', borderRadius: 8, padding: '10px 12px', fontSize: 13, marginTop: 12 }}>
+                            {error}
+                        </div>
+                    )}
                     <div className="modal-actions" style={{ marginTop: 20 }}>
                         <button
                             className="btn btn-sm"
@@ -138,14 +150,12 @@ function CancelModal({ appt, onConfirm, onClose, cancelling }) {
 }
 
 // ─── Report Upload Modal ──────────────────────────────────────────────────────
+// Uploads via multipart/form-data (reportService.upload -> POST /api/reports).
 function ReportUploadModal({ apptId, onClose, onUploaded }) {
-    const { user } = useAuth();
     const [file, setFile] = useState(null);
-    const [reportType, setReportType] = useState('Blood Test');
     const [uploading, setUploading] = useState(false);
     const [error, setError] = useState('');
-
-    const REPORT_TYPES = ['Blood Test', 'X-Ray', 'MRI', 'CT Scan', 'Prescription', 'Other'];
+    const [uploaded, setUploaded] = useState(null);
 
     const handleUpload = async () => {
         if (!file) { setError('Please select a file.'); return; }
@@ -153,21 +163,11 @@ function ReportUploadModal({ apptId, onClose, onUploaded }) {
         setUploading(true);
         setError('');
         try {
-            const storageRef = ref(storage, `reports/${user.uid}/${Date.now()}_${file.name}`);
-            await uploadBytes(storageRef, file);
-            const url = await getDownloadURL(storageRef);
-            await addDoc(collection(db, 'Reports'), {
-                patientId: user.uid,
-                appointmentId: apptId,
-                reportType,
-                fileName: file.name,
-                reportURL: url,
-                uploadedAt: serverTimestamp(),
-            });
-            onUploaded();
-            onClose();
+            const report = await reportService.upload(file, { appointmentId: apptId });
+            setUploaded(report);
+            onUploaded?.(report);
         } catch (e) {
-            setError('Upload failed: ' + (e.message || 'Unknown error'));
+            setError(apiErrorMessage(e, 'Upload failed'));
         } finally {
             setUploading(false);
         }
@@ -183,41 +183,49 @@ function ReportUploadModal({ apptId, onClose, onUploaded }) {
                     <h3 className="modal-banner-title">Upload Medical Report</h3>
                 </div>
                 <div className="modal-body">
-                    <div className="form-group">
-                        <label style={{ fontSize: 13, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>Report Type</label>
-                        <select
-                            value={reportType}
-                            onChange={e => setReportType(e.target.value)}
-                            style={{ width: '100%', padding: '10px 12px', border: '2px solid #E0E7FF', borderRadius: 10, fontFamily: 'inherit', fontSize: 14, outline: 'none' }}
-                        >
-                            {REPORT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                    </div>
-                    <div className="form-group">
-                        <label style={{ fontSize: 13, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>Select File (PDF, JPG, PNG — max 5MB)</label>
-                        <input
-                            type="file"
-                            accept=".pdf,.jpg,.jpeg,.png"
-                            onChange={e => { setFile(e.target.files[0]); setError(''); }}
-                            style={{ width: '100%', fontSize: 13 }}
-                        />
-                        {file && <p style={{ fontSize: 12, color: '#2E7D32', marginTop: 6 }}>✓ {file.name}</p>}
-                    </div>
-                    {error && (
-                        <div style={{ background: '#FFEBEE', color: '#C62828', borderRadius: 8, padding: '10px 12px', fontSize: 13, marginBottom: 12 }}>
-                            {error}
+                    {uploaded ? (
+                        <div>
+                            <div style={{ background: '#E8F5E9', color: '#2E7D32', borderRadius: 10, padding: '14px 16px', fontSize: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <CheckCircle size={18} /> Report uploaded successfully.
+                            </div>
+                            <a href={uploaded.fileUrl} target="_blank" rel="noreferrer"
+                                style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginTop: 14, color: '#0277BD', fontWeight: 600, fontSize: 14, textDecoration: 'none' }}>
+                                <Eye size={15} /> View uploaded report
+                            </a>
+                            <p style={{ fontSize: 11, color: '#94A3B8', marginTop: 8, wordBreak: 'break-all' }}>{uploaded.fileUrl}</p>
+                            <div className="modal-actions" style={{ marginTop: 16 }}>
+                                <button className="btn btn-primary btn-sm" onClick={onClose}>Done</button>
+                            </div>
                         </div>
+                    ) : (
+                        <>
+                            <div className="form-group">
+                                <label style={{ fontSize: 13, fontWeight: 600, color: '#475569', display: 'block', marginBottom: 6 }}>Select File (PDF, JPG, PNG — max 5MB)</label>
+                                <input
+                                    type="file"
+                                    accept=".pdf,.jpg,.jpeg,.png"
+                                    onChange={e => { setFile(e.target.files[0]); setError(''); }}
+                                    style={{ width: '100%', fontSize: 13 }}
+                                />
+                                {file && <p style={{ fontSize: 12, color: '#2E7D32', marginTop: 6 }}>✓ {file.name}</p>}
+                            </div>
+                            {error && (
+                                <div style={{ background: '#FFEBEE', color: '#C62828', borderRadius: 8, padding: '10px 12px', fontSize: 13, marginBottom: 12 }}>
+                                    {error}
+                                </div>
+                            )}
+                            <div className="modal-actions">
+                                <button
+                                    className="btn btn-primary btn-sm"
+                                    onClick={handleUpload}
+                                    disabled={uploading || !file}
+                                >
+                                    {uploading ? 'Uploading…' : 'Upload Report'}
+                                </button>
+                                <button className="btn btn-outline btn-sm" onClick={onClose} disabled={uploading}>Cancel</button>
+                            </div>
+                        </>
                     )}
-                    <div className="modal-actions">
-                        <button
-                            className="btn btn-primary btn-sm"
-                            onClick={handleUpload}
-                            disabled={uploading || !file}
-                        >
-                            {uploading ? 'Uploading…' : 'Upload Report'}
-                        </button>
-                        <button className="btn btn-outline btn-sm" onClick={onClose} disabled={uploading}>Cancel</button>
-                    </div>
                 </div>
             </div>
         </div>
@@ -225,8 +233,11 @@ function ReportUploadModal({ apptId, onClose, onUploaded }) {
 }
 
 // ─── Prescription View Modal ──────────────────────────────────────────────────
-function PrescriptionModal({ prescription, onClose }) {
-    if (!prescription) return null;
+// Renders medicines[] + notes from GET /api/appointments/:id/prescription, with
+// clean loading / empty / error states.
+function PrescriptionModal({ state, onClose }) {
+    if (!state) return null;
+    const { loading, data, empty, error, doctorName } = state;
     return (
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal" style={{ maxWidth: 460 }} onClick={e => e.stopPropagation()}>
@@ -234,32 +245,54 @@ function PrescriptionModal({ prescription, onClose }) {
                     <div className="modal-banner-icon pop-in">
                         <FileText size={34} color="white" />
                     </div>
-                    <h3 className="modal-banner-title">Your Prescription</h3>
+                    <h3 className="modal-banner-title">Prescription</h3>
                 </div>
                 <div className="modal-body">
-                    <div style={{ background: '#F8FAFF', borderRadius: 12, padding: '16px 18px', border: '1px solid #E0E7FF' }}>
-                        {prescription.medicine && (
-                            <div style={{ marginBottom: 10 }}>
-                                <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase' }}>Medicine</span>
-                                <p style={{ fontWeight: 600, fontSize: 15, color: '#0F172A', marginTop: 2 }}>💊 {prescription.medicine}</p>
+                    {loading ? (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '24px 0', color: '#64748B', fontSize: 14 }}>
+                            <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} /> Loading prescription…
+                        </div>
+                    ) : error ? (
+                        <div style={{ background: '#FFEBEE', color: '#C62828', borderRadius: 8, padding: '12px 14px', fontSize: 13 }}>
+                            {error}
+                        </div>
+                    ) : empty ? (
+                        <div className="empty-state" style={{ padding: '20px 0' }}>
+                            <div className="empty-icon">📝</div>
+                            <h3>No Prescription Yet</h3>
+                            <p>Your doctor hasn’t added a prescription for this appointment.</p>
+                        </div>
+                    ) : data ? (
+                        <>
+                            <div style={{ background: '#F8FAFF', borderRadius: 12, padding: '16px 18px', border: '1px solid #E0E7FF' }}>
+                                {Array.isArray(data.medicines) && data.medicines.length > 0 ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                                        {data.medicines.map((m, i) => (
+                                            <div key={i} style={{ borderBottom: i < data.medicines.length - 1 ? '1px dashed #E0E7FF' : 'none', paddingBottom: i < data.medicines.length - 1 ? 12 : 0 }}>
+                                                <p style={{ fontWeight: 700, fontSize: 15, color: '#0F172A', margin: 0 }}>💊 {m.name}</p>
+                                                <div style={{ fontSize: 13, color: '#475569', marginTop: 4, display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+                                                    {m.dosage && <span>⚖️ {m.dosage}</span>}
+                                                    {m.frequency && <span>🕒 {m.frequency}</span>}
+                                                    {m.duration && <span>📆 {m.duration}</span>}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p style={{ fontSize: 13, color: '#64748B', margin: 0 }}>No medicines listed.</p>
+                                )}
+                                {data.notes && (
+                                    <div style={{ marginTop: 14 }}>
+                                        <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase' }}>Doctor Notes</span>
+                                        <p style={{ fontSize: 14, color: '#475569', marginTop: 4, lineHeight: 1.6 }}>📝 {data.notes}</p>
+                                    </div>
+                                )}
                             </div>
-                        )}
-                        {prescription.dosage && (
-                            <div style={{ marginBottom: 10 }}>
-                                <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase' }}>Dosage</span>
-                                <p style={{ fontWeight: 600, fontSize: 15, color: '#0F172A', marginTop: 2 }}>⚖️ {prescription.dosage}</p>
-                            </div>
-                        )}
-                        {prescription.notes && (
-                            <div style={{ marginBottom: 4 }}>
-                                <span style={{ fontSize: 12, fontWeight: 700, color: '#64748B', textTransform: 'uppercase' }}>Doctor Notes</span>
-                                <p style={{ fontSize: 14, color: '#475569', marginTop: 4, lineHeight: 1.6 }}>📝 {prescription.notes}</p>
-                            </div>
-                        )}
-                    </div>
-                    <p style={{ fontSize: 12, color: '#94A3B8', marginTop: 12, textAlign: 'center' }}>
-                        Prescribed by {prescription.doctorName}
-                    </p>
+                            <p style={{ fontSize: 12, color: '#94A3B8', marginTop: 12, textAlign: 'center' }}>
+                                Prescribed by {data.doctor?.user?.name || doctorName}
+                            </p>
+                        </>
+                    ) : null}
                     <div className="modal-actions" style={{ marginTop: 16 }}>
                         <button className="btn btn-outline btn-sm" onClick={onClose}>Close</button>
                     </div>
@@ -269,154 +302,99 @@ function PrescriptionModal({ prescription, onClose }) {
     );
 }
 
-const DEMO_APPOINTMENTS = [
-    { doctorName: 'Dr. Arjun Verma', specialization: 'MBBS', hospital: 'Apollo Hospitals', category: 'MBBS', patientName: '', date: '2026-02-10', day: 'Tuesday', time: '09:00 AM', status: 'Approved' },
-    { doctorName: 'Dr. Deepak Mathur', specialization: 'Cardiologist', hospital: 'Fortis Healthcare', category: 'Cardiologist', patientName: '', date: '2026-02-14', day: 'Saturday', time: '10:30 AM', status: 'Approved' },
-    { doctorName: 'Dr. Shruti Agarwal', specialization: 'Dermatologist', hospital: 'AIIMS', category: 'Dermatologist', patientName: '', date: '2026-02-20', day: 'Friday', time: '11:00 AM', status: 'Rejected' },
-    { doctorName: 'Dr. Geeta Varma', specialization: 'Pediatrician', hospital: 'Manipal Hospital', category: 'Pediatrician', patientName: '', date: '2026-02-25', day: 'Wednesday', time: '02:00 PM', status: 'Approved' },
-    { doctorName: 'Dr. Siddharth Jain', specialization: 'Neurologist', hospital: 'Max Super Speciality', category: 'Neurologist', patientName: '', date: '2026-03-01', day: 'Sunday', time: '04:00 PM', status: 'Rejected' },
-    { doctorName: 'Dr. Neha Kapoor', specialization: 'BDS', hospital: 'Columbia Asia', category: 'BDS', patientName: '', date: '2026-03-03', day: 'Tuesday', time: '09:30 AM', status: 'Pending' },
-    { doctorName: 'Dr. Shobha Menon', specialization: 'Gynecologist', hospital: 'Cloudnine Hospital', category: 'Gynecologist', patientName: '', date: '2026-03-05', day: 'Thursday', time: '11:30 AM', status: 'Pending' },
-    { doctorName: 'Dr. Rajiv Tandon', specialization: 'Orthopedic', hospital: 'Care Hospitals', category: 'Orthopedic', patientName: '', date: '2026-03-07', day: 'Saturday', time: '03:00 PM', status: 'Pending' },
-];
-
 export default function AppointmentHistory() {
-    const { user } = useAuth();
     const [appointments, setAppointments] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
-    const [toasts, setToasts] = useState([]);
-    const [seeding, setSeeding] = useState(false);
-    const [activeTab, setActiveTab] = useState('all'); // 'all' | 'timeline' | status filters
-    const [searchQuery, setSearchQuery] = useState('');
     const [reports, setReports] = useState([]);
-    const [userRatings, setUserRatings] = useState({}); // apptId -> stars
-    const prevStatuses = useRef({});
-    const isFirstLoad = useRef(true);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [error, setError] = useState('');
+    const [activeTab, setActiveTab] = useState('all');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [ratedAppts, setRatedAppts] = useState(() => new Set());
 
     // Modals
     const [cancelTarget, setCancelTarget] = useState(null);
     const [cancelling, setCancelling] = useState(false);
+    const [cancelError, setCancelError] = useState('');
     const [uploadTarget, setUploadTarget] = useState(null); // apptId
-    const [prescriptionTarget, setPrescriptionTarget] = useState(null); // prescription object
+    const [prescriptionState, setPrescriptionState] = useState(null);
 
-    const dismissToast = (id) => setToasts(prev => prev.filter(t => t.id !== id));
-
-    const seedDemoAppointments = async () => {
-        setSeeding(true);
-        const name = user.displayName || user.email?.split('@')[0] || 'Patient';
+    // Fetch appointments + reports from the REST API.
+    const load = useCallback(async ({ silent = false } = {}) => {
+        if (silent) setRefreshing(true); else setLoading(true);
+        setError('');
         try {
-            await Promise.all(DEMO_APPOINTMENTS.map(appt =>
-                addDoc(collection(db, 'Appointments'), {
-                    ...appt,
-                    patientName: name,
-                    userId: user.uid,
-                    userEmail: user.email,
-                    doctorId: `demo-${appt.category}`,
-                    timestamp: serverTimestamp(),
-                })
-            ));
+            const [apptRes, reportList] = await Promise.all([
+                appointmentService.list({ limit: 50 }),
+                reportService.list().catch(() => []), // reports are best-effort
+            ]);
+            setAppointments((apptRes.appointments || []).map(normalizeAppt));
+            setReports(reportList || []);
         } catch (e) {
-            console.error('Seed error', e);
+            setError(apiErrorMessage(e, 'Could not load appointments'));
         } finally {
-            setSeeding(false);
+            if (silent) setRefreshing(false); else setLoading(false);
         }
-    };
+    }, []);
+
+    // Initial load.
+    useEffect(() => { load(); }, [load]);
+
+    // Refetch when the window regains focus (live onSnapshot is intentionally
+    // replaced by fetch + manual/refocus refresh).
+    useEffect(() => {
+        const onFocus = () => load({ silent: true });
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, [load]);
+
+    const refreshReports = useCallback(async () => {
+        try {
+            const list = await reportService.list();
+            setReports(list || []);
+        } catch { /* keep existing reports on failure */ }
+    }, []);
 
     const handleCancelConfirm = async () => {
         if (!cancelTarget) return;
         setCancelling(true);
+        setCancelError('');
         try {
-            await updateDoc(doc(db, 'Appointments', cancelTarget.id), { status: 'Cancelled' });
-        } catch (err) {
-            console.error('Cancel error', err);
+            const updated = await appointmentService.cancel(cancelTarget.id);
+            setAppointments(prev => prev.map(a => (a.id === updated._id ? normalizeAppt(updated) : a)));
+            setCancelTarget(null);
+        } catch (e) {
+            setCancelError(apiErrorMessage(e, 'Could not cancel appointment'));
         } finally {
             setCancelling(false);
-            setCancelTarget(null);
         }
     };
 
-    // Load appointments
-    useEffect(() => {
-        let unsubscribe = () => { };
-        const startListener = (withOrder) => {
-            const q = withOrder
-                ? query(collection(db, 'Appointments'), where('userId', '==', user.uid), orderBy('timestamp', 'desc'))
-                : query(collection(db, 'Appointments'), where('userId', '==', user.uid));
-
-            unsubscribe = onSnapshot(q, (snap) => {
-                const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                docs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
-
-                if (!isFirstLoad.current) {
-                    docs.forEach(appt => {
-                        const prev = prevStatuses.current[appt.id];
-                        if (prev === 'Pending' && appt.status === 'Approved') {
-                            const toastId = `${appt.id}-${Date.now()}`;
-                            setToasts(t => [...t, {
-                                id: toastId,
-                                message: `Your appointment with ${appt.doctorName} has been approved!`,
-                            }]);
-                            setTimeout(() => dismissToast(toastId), 6000);
-                        }
-                    });
-                }
-
-                docs.forEach(appt => { prevStatuses.current[appt.id] = appt.status; });
-                isFirstLoad.current = false;
-                setAppointments(docs);
-                setLoading(false);
-                setError('');
-            }, (err) => {
-                if (withOrder && err?.code === 'failed-precondition') {
-                    unsubscribe();
-                    startListener(false);
-                } else {
-                    setError(`Could not load appointments: ${err.message}`);
-                    setLoading(false);
-                }
-            });
-        };
-        startListener(true);
-        return () => unsubscribe();
-    }, [user.uid]);
-
-    // Load reports
-    useEffect(() => {
-        const load = async () => {
-            try {
-                const q = query(collection(db, 'Reports'), where('patientId', '==', user.uid));
-                const snap = await getDocs(q);
-                setReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-            } catch { }
-        };
-        load();
-    }, [user.uid]);
-
-    // Load user ratings
-    useEffect(() => {
-        const load = async () => {
-            try {
-                const q = query(collection(db, 'Ratings'), where('patientId', '==', user.uid));
-                const snap = await getDocs(q);
-                const map = {};
-                snap.docs.forEach(d => { map[d.data().doctorId] = d.data().rating; });
-                setUserRatings(map);
-            } catch { }
-        };
-        load();
-    }, [user.uid]);
+    const openPrescription = async (appt) => {
+        setPrescriptionState({ loading: true, data: null, empty: false, error: '', doctorName: appt.doctorName });
+        try {
+            const p = await prescriptionService.get(appt.id);
+            setPrescriptionState({ loading: false, data: p, empty: false, error: '', doctorName: appt.doctorName });
+        } catch (e) {
+            if (e?.response?.status === 404) {
+                setPrescriptionState({ loading: false, data: null, empty: true, error: '', doctorName: appt.doctorName });
+            } else {
+                setPrescriptionState({ loading: false, data: null, empty: false, error: apiErrorMessage(e, 'Could not load prescription'), doctorName: appt.doctorName });
+            }
+        }
+    };
 
     const stats = {
         total: appointments.length,
-        approved: appointments.filter(a => a.status === 'Approved').length,
-        pending: appointments.filter(a => a.status === 'Pending').length,
-        rejected: appointments.filter(a => a.status === 'Rejected').length,
-        cancelled: appointments.filter(a => a.status === 'Cancelled').length,
+        approved: appointments.filter(a => a.status === 'approved').length,
+        completed: appointments.filter(a => a.status === 'completed').length,
+        pending: appointments.filter(a => a.status === 'pending').length,
+        rejected: appointments.filter(a => a.status === 'rejected').length,
+        cancelled: appointments.filter(a => a.status === 'cancelled').length,
     };
 
-    // Health score: 0-100 based on kept (approved) vs missed (cancelled/rejected)
-    const kept = stats.approved;
+    // Health score: kept (approved + completed) vs missed (cancelled + rejected).
+    const kept = stats.approved + stats.completed;
     const missed = stats.cancelled + stats.rejected;
     const healthScore = stats.total === 0 ? null
         : Math.max(0, Math.min(100, Math.round(((kept * 2 - missed) / Math.max(stats.total * 2, 1)) * 100)));
@@ -426,31 +404,33 @@ export default function AppointmentHistory() {
                 : healthScore >= 40 ? { text: 'Fair', color: '#E65100', bg: '#FFF8E1' }
                     : { text: 'Needs Attention', color: '#C62828', bg: '#FFEBEE' };
 
-    // Countdown helper
     const getDaysAway = (dateStr) => {
         if (!dateStr) return null;
         const today = new Date(); today.setHours(0, 0, 0, 0);
         const apptDate = new Date(dateStr); apptDate.setHours(0, 0, 0, 0);
-        const diff = Math.round((apptDate - today) / (1000 * 60 * 60 * 24));
-        return diff;
+        return Math.round((apptDate - today) / (1000 * 60 * 60 * 24));
     };
 
     const FILTER_TABS = [
         { key: 'all', label: 'All', count: stats.total },
-        { key: 'Approved', label: '✓ Approved', count: stats.approved },
-        { key: 'Pending', label: '⏳ Pending', count: stats.pending },
-        { key: 'Rejected', label: '✗ Rejected', count: stats.rejected },
-        { key: 'Cancelled', label: '🚫 Cancelled', count: stats.cancelled },
+        { key: 'approved', label: '✓ Approved', count: stats.approved },
+        { key: 'completed', label: '🏁 Completed', count: stats.completed },
+        { key: 'pending', label: '⏳ Pending', count: stats.pending },
+        { key: 'rejected', label: '✗ Rejected', count: stats.rejected },
+        { key: 'cancelled', label: '🚫 Cancelled', count: stats.cancelled },
         { key: 'timeline', label: '📅 Timeline', count: null },
     ];
 
+    const STATUS_TAB_COLORS = {
+        all: '#1565C0', approved: '#2E7D32', completed: '#00695C',
+        pending: '#E65100', rejected: '#C62828', cancelled: '#64748B', timeline: '#6D28D9',
+    };
+
     const getFilteredAppointments = () => {
         let list = [...appointments];
-        // Status filter
         if (activeTab !== 'all' && activeTab !== 'timeline') {
             list = list.filter(a => a.status === activeTab);
         }
-        // Search
         if (searchQuery.trim()) {
             const q = searchQuery.toLowerCase();
             list = list.filter(a =>
@@ -463,27 +443,29 @@ export default function AppointmentHistory() {
         return list;
     };
 
-    // ─── Timeline View ─────────────────────────────────────────────────────────
+    // ─── Timeline View (client-side, from API data) ────────────────────────────
     const getTimelineData = () => {
         const apptItems = appointments.map(a => ({
             date: a.date,
             type: 'appointment',
-            label: `${a.category} — ${a.doctorName}`,
-            detail: `${a.hospital} · ${a.time}`,
+            label: `${a.category || 'Appointment'} — ${a.doctorName}`,
+            detail: `${a.hospital ? a.hospital + ' · ' : ''}${a.time}`,
             status: a.status,
             icon: '🏥',
         }));
-        const reportItems = reports.map(r => ({
-            date: r.uploadedAt?.toDate?.()?.toISOString?.()?.split('T')[0] || 'Unknown',
-            type: 'report',
-            label: `${r.reportType} uploaded`,
-            detail: r.fileName,
-            status: 'report',
-            icon: '📄',
-            url: r.reportURL,
-        }));
-        const all = [...apptItems, ...reportItems].sort((a, b) => b.date.localeCompare(a.date));
-        // Group by year
+        const reportItems = reports.map(r => {
+            const d = r.uploadedAt ? new Date(r.uploadedAt) : null;
+            return {
+                date: d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString('en-CA') : 'Unknown',
+                type: 'report',
+                label: 'Report uploaded',
+                detail: r.fileName || 'Medical report',
+                status: 'report',
+                icon: '📄',
+                url: r.fileUrl,
+            };
+        });
+        const all = [...apptItems, ...reportItems].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
         const grouped = {};
         all.forEach(item => {
             const year = item.date?.slice(0, 4) || 'Unknown';
@@ -493,39 +475,26 @@ export default function AppointmentHistory() {
         return grouped;
     };
 
-    const STATUS_TAB_COLORS = {
-        'all': '#1565C0',
-        'Approved': '#2E7D32',
-        'Pending': '#E65100',
-        'Rejected': '#C62828',
-        'Cancelled': '#64748B',
-        'timeline': '#6D28D9',
-    };
-
     return (
         <div>
-            <ApprovalToast toasts={toasts} onDismiss={dismissToast} />
             <CancelModal
                 appt={cancelTarget}
                 onConfirm={handleCancelConfirm}
-                onClose={() => setCancelTarget(null)}
+                onClose={() => { setCancelTarget(null); setCancelError(''); }}
                 cancelling={cancelling}
+                error={cancelError}
             />
             {uploadTarget && (
                 <ReportUploadModal
                     apptId={uploadTarget}
                     onClose={() => setUploadTarget(null)}
-                    onUploaded={() => {
-                        // Refresh reports
-                        getDocs(query(collection(db, 'Reports'), where('patientId', '==', user.uid)))
-                            .then(snap => setReports(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
-                    }}
+                    onUploaded={refreshReports}
                 />
             )}
-            {prescriptionTarget && (
+            {prescriptionState && (
                 <PrescriptionModal
-                    prescription={prescriptionTarget}
-                    onClose={() => setPrescriptionTarget(null)}
+                    state={prescriptionState}
+                    onClose={() => setPrescriptionState(null)}
                 />
             )}
 
@@ -535,23 +504,15 @@ export default function AppointmentHistory() {
                         <h1>Appointment History</h1>
                         <p>View, rate, and manage all your appointments</p>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        {!loading && stats.approved === 0 && (
-                            <button
-                                className="btn btn-outline btn-sm"
-                                onClick={seedDemoAppointments}
-                                disabled={seeding}
-                                style={{ display: 'flex', alignItems: 'center', gap: 6, borderColor: '#2E7D32', color: '#2E7D32' }}
-                            >
-                                <Sparkles size={14} />
-                                {seeding ? 'Adding...' : 'Add Demo Appointments'}
-                            </button>
-                        )}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            {loading && <div className="loading-spinner" style={{ width: 14, height: 14 }} />}
-                            <span style={{ fontSize: 12, color: '#64748B' }}>🔴 Live updates</span>
-                        </div>
-                    </div>
+                    <button
+                        className="btn btn-outline btn-sm"
+                        onClick={() => load({ silent: true })}
+                        disabled={loading || refreshing}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                        <RefreshCw size={14} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
+                        {refreshing ? 'Refreshing…' : 'Refresh'}
+                    </button>
                 </div>
             </div>
 
@@ -566,8 +527,7 @@ export default function AppointmentHistory() {
                         <div style={{
                             width: 52, height: 52, borderRadius: '50%',
                             background: `conic-gradient(${healthLabel.color} ${healthScore * 3.6}deg, #E2E8F0 0deg)`,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            flexShrink: 0,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                         }}>
                             <div style={{
                                 width: 38, height: 38, borderRadius: '50%',
@@ -594,8 +554,8 @@ export default function AppointmentHistory() {
                     {[
                         { label: 'Total', value: stats.total, icon: <ClipboardList size={22} />, cls: 'blue' },
                         { label: 'Approved', value: stats.approved, icon: '✓', cls: 'green' },
+                        { label: 'Completed', value: stats.completed, icon: '🏁', cls: 'green' },
                         { label: 'Pending', value: stats.pending, icon: '⏳', cls: 'orange' },
-                        { label: 'Rejected', value: stats.rejected, icon: '✗', cls: 'red' },
                         { label: 'Cancelled', value: stats.cancelled, icon: '🚫', cls: '' },
                     ].map(s => (
                         <div key={s.label} className="stat-card">
@@ -646,8 +606,9 @@ export default function AppointmentHistory() {
                 </div>
 
                 {error && (
-                    <div style={{ background: '#FFEBEE', border: '1px solid #EF9A9A', borderRadius: 10, padding: '12px 16px', marginBottom: 20, color: '#C62828', fontSize: 13 }}>
-                        Error: {error}
+                    <div style={{ background: '#FFEBEE', border: '1px solid #EF9A9A', borderRadius: 10, padding: '12px 16px', marginBottom: 20, color: '#C62828', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                        <span>Error: {error}</span>
+                        <button className="btn btn-outline btn-sm" onClick={() => load()}>Retry</button>
                     </div>
                 )}
 
@@ -686,15 +647,11 @@ export default function AppointmentHistory() {
                                     <div style={{ borderLeft: '3px solid #E0E7FF', paddingLeft: 24, display: 'flex', flexDirection: 'column', gap: 12 }}>
                                         {grouped[year].map((item, i) => (
                                             <div key={i} style={{ position: 'relative' }}>
-                                                {/* Dot */}
                                                 <div style={{
                                                     position: 'absolute', left: -33, top: 14,
                                                     width: 14, height: 14, borderRadius: '50%',
-                                                    background: item.type === 'report' ? '#0097A7' :
-                                                        item.status === 'Approved' ? '#2E7D32' :
-                                                            item.status === 'Pending' ? '#E65100' : '#C62828',
-                                                    border: '3px solid white',
-                                                    boxShadow: '0 0 0 2px #E0E7FF',
+                                                    background: item.type === 'report' ? '#0097A7' : metaFor(item.status).dot,
+                                                    border: '3px solid white', boxShadow: '0 0 0 2px #E0E7FF',
                                                 }} />
                                                 <div className="card" style={{
                                                     padding: '14px 18px',
@@ -717,7 +674,7 @@ export default function AppointmentHistory() {
                                                             </a>
                                                         )}
                                                         {item.type === 'appointment' && (
-                                                            <span className={`badge ${STATUS_STYLES[item.status] || 'badge-pending'}`}>
+                                                            <span className={`badge ${metaFor(item.status).badge}`}>
                                                                 {item.status}
                                                             </span>
                                                         )}
@@ -750,59 +707,45 @@ export default function AppointmentHistory() {
                                 </div>
                             </div>
                         ) : getFilteredAppointments().map(appt => {
-                            const statusColors = {
-                                Approved: { border: '#A5D6A7', bg: '#E8F5E9', txt: '#2E7D32' },
-                                Pending: { border: '#FFE082', bg: '#FFF8E1', txt: '#E65100' },
-                                Rejected: { border: '#EF9A9A', bg: '#FFEBEE', txt: '#C62828' },
-                                Cancelled: { border: '#E0E7FF', bg: '#F8FAFF', txt: '#64748B' },
-                            };
-                            const sc = statusColors[appt.status] || statusColors.Pending;
-                            const apptReports = reports.filter(r => r.appointmentId === appt.id);
+                            const sc = metaFor(appt.status);
+                            const apptReports = reports.filter(r => r.appointment === appt.id);
+                            const daysAway = getDaysAway(appt.date);
+                            const isFuture = daysAway !== null && daysAway >= 0;
+                            const cancellable = (appt.status === 'pending' || appt.status === 'approved') && isFuture;
+                            const canViewPrescription = appt.status === 'approved' || appt.status === 'completed';
 
                             return (
                                 <div key={appt.id} style={{
                                     background: 'white', borderRadius: 16,
                                     border: `2px solid ${sc.border}`,
-                                    boxShadow: '0 2px 12px rgba(0,0,0,0.05)',
-                                    overflow: 'hidden',
+                                    boxShadow: '0 2px 12px rgba(0,0,0,0.05)', overflow: 'hidden',
                                 }}>
                                     {/* Status bar */}
                                     <div style={{
                                         background: sc.bg, padding: '10px 20px',
                                         display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
                                     }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                            <span className={`badge ${STATUS_STYLES[appt.status] || 'badge-pending'}`}>
-                                                {appt.status === 'Pending' ? '⏳ Pending'
-                                                    : appt.status === 'Approved' ? '✓ Approved'
-                                                        : appt.status === 'Cancelled' ? '🚫 Cancelled'
-                                                            : appt.status}
-                                            </span>
-                                            {/* Countdown badge */}
-                                            {appt.status === 'Approved' && (() => {
-                                                const days = getDaysAway(appt.date);
-                                                if (days === null) return null;
-                                                if (days < 0) return null; // past
-                                                return (
-                                                    <span style={{
-                                                        background: days === 0 ? '#00695C' : '#0D47A1',
-                                                        color: 'white', fontSize: 11, fontWeight: 700,
-                                                        padding: '3px 10px', borderRadius: 20,
-                                                        display: 'flex', alignItems: 'center', gap: 4,
-                                                    }}>
-                                                        {days === 0 ? '🎯 Today!' : `📅 ${days} day${days !== 1 ? 's' : ''} away`}
-                                                    </span>
-                                                );
-                                            })()}
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                            <span className={`badge ${sc.badge}`}>{sc.label}</span>
+                                            {appt.status === 'approved' && isFuture && (
+                                                <span style={{
+                                                    background: daysAway === 0 ? '#00695C' : '#0D47A1',
+                                                    color: 'white', fontSize: 11, fontWeight: 700,
+                                                    padding: '3px 10px', borderRadius: 20,
+                                                    display: 'flex', alignItems: 'center', gap: 4,
+                                                }}>
+                                                    {daysAway === 0 ? '🎯 Today!' : `📅 ${daysAway} day${daysAway !== 1 ? 's' : ''} away`}
+                                                </span>
+                                            )}
                                             <span style={{ fontSize: 12, color: sc.txt, fontWeight: 600 }}>
                                                 {appt.date} · {appt.time}
                                             </span>
                                         </div>
                                         {/* Actions */}
                                         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                            {appt.status === 'Pending' && (
+                                            {cancellable && (
                                                 <button
-                                                    onClick={() => setCancelTarget(appt)}
+                                                    onClick={() => { setCancelError(''); setCancelTarget(appt); }}
                                                     style={{
                                                         background: '#FFEBEE', color: '#C62828',
                                                         border: '1px solid #EF9A9A', borderRadius: 7,
@@ -812,9 +755,9 @@ export default function AppointmentHistory() {
                                                     Cancel
                                                 </button>
                                             )}
-                                            {appt.prescription && (
+                                            {canViewPrescription && (
                                                 <button
-                                                    onClick={() => setPrescriptionTarget({ ...appt.prescription, doctorName: appt.doctorName })}
+                                                    onClick={() => openPrescription(appt)}
                                                     style={{
                                                         background: '#E8F5E9', color: '#2E7D32',
                                                         border: '1px solid #A5D6A7', borderRadius: 7,
@@ -842,7 +785,6 @@ export default function AppointmentHistory() {
                                     {/* Card body */}
                                     <div style={{ padding: '16px 20px' }}>
                                         <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                                            {/* Doctor avatar */}
                                             <div style={{
                                                 width: 48, height: 48, borderRadius: '50%',
                                                 background: 'linear-gradient(135deg,#0D47A1,#0097A7)',
@@ -854,29 +796,25 @@ export default function AppointmentHistory() {
                                             <div style={{ flex: 1 }}>
                                                 <div style={{ fontWeight: 700, fontSize: 15, color: '#0F172A' }}>{appt.doctorName}</div>
                                                 <div style={{ fontSize: 13, color: '#64748B', marginBottom: 6 }}>
-                                                    {appt.hospital} · {appt.category}
+                                                    {appt.hospital ? `${appt.hospital} · ` : ''}{appt.category}
+                                                    {typeof appt.consultationFee === 'number' && appt.consultationFee > 0 && ` · ₹${appt.consultationFee}`}
                                                 </div>
-                                                <div style={{ fontSize: 13, color: '#475569' }}>
-                                                    👤 {appt.patientName}
-                                                    {appt.patientAge && ` · Age: ${appt.patientAge}`}
-                                                    {appt.patientGender && ` · ${appt.patientGender}`}
-                                                    {appt.patientPhone && ` · 📞 ${appt.patientPhone}`}
-                                                </div>
-                                                {appt.patientReason && (
+                                                {appt.patientName && (
+                                                    <div style={{ fontSize: 13, color: '#475569' }}>👤 {appt.patientName}</div>
+                                                )}
+                                                {appt.reason && (
                                                     <div style={{ fontSize: 12, color: '#64748B', marginTop: 4, fontStyle: 'italic' }}>
-                                                        📝 {appt.patientReason}
+                                                        📝 {appt.reason}
                                                     </div>
                                                 )}
 
-                                                {/* Rating — only for Approved appointments */}
-                                                {appt.status === 'Approved' && (
+                                                {/* Rating — only for COMPLETED appointments */}
+                                                {appt.status === 'completed' && (
                                                     <div style={{ marginTop: 10 }}>
                                                         <StarRating
-                                                            doctorId={appt.doctorId}
-                                                            doctorName={appt.doctorName}
-                                                            category={appt.category}
-                                                            existingRating={userRatings[appt.doctorId]}
-                                                            onRated={(stars) => setUserRatings(prev => ({ ...prev, [appt.doctorId]: stars }))}
+                                                            appointmentId={appt.id}
+                                                            alreadyRated={ratedAppts.has(appt.id)}
+                                                            onRated={(id) => setRatedAppts(prev => new Set(prev).add(id))}
                                                         />
                                                     </div>
                                                 )}
@@ -885,16 +823,15 @@ export default function AppointmentHistory() {
                                                 {apptReports.length > 0 && (
                                                     <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                                                         {apptReports.map(r => (
-                                                            <a key={r.id} href={r.reportURL} target="_blank" rel="noreferrer"
+                                                            <a key={r._id} href={r.fileUrl} target="_blank" rel="noreferrer"
                                                                 style={{
                                                                     background: '#F0FDF4', border: '1px solid #A7F3D0',
                                                                     color: '#065F46', borderRadius: 8,
                                                                     padding: '3px 10px', fontSize: 12, fontWeight: 600,
-                                                                    display: 'flex', alignItems: 'center', gap: 5,
-                                                                    textDecoration: 'none',
+                                                                    display: 'flex', alignItems: 'center', gap: 5, textDecoration: 'none',
                                                                 }}
                                                             >
-                                                                <FileText size={11} /> {r.reportType}
+                                                                <FileText size={11} /> {r.fileName || 'Report'}
                                                             </a>
                                                         ))}
                                                     </div>
