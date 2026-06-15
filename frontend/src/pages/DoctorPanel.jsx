@@ -1,118 +1,74 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { Navigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { db } from '../firebase';
-import {
-    collection, query, where, onSnapshot, doc, updateDoc
-} from 'firebase/firestore';
+import * as appointmentService from '../api/services/appointmentService';
+import * as prescriptionService from '../api/services/prescriptionService';
+import { apiErrorMessage } from '../api/client';
 import {
     ClipboardList, CheckCircle, Clock, Stethoscope, Building2,
-    CalendarDays, Loader2, Lock, Eye, EyeOff, ShieldCheck,
-    History, User, Phone, XCircle, FileText, Star
+    CalendarDays, Loader2, History, XCircle, FileText, RefreshCw, ShieldAlert,
 } from 'lucide-react';
 
-// ─── Doctor Panel Password ────────────────────────────────────────────────────
-const DOCTOR_PASSWORD = 'manaswi';
+// Status comparisons use the API's lowercase enum
+// (pending | approved | rejected | cancelled | completed).
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const titleCase = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
-// ─── Password Gate ────────────────────────────────────────────────────────────
-function PasswordGate({ onUnlock }) {
-    const [input, setInput] = useState('');
-    const [show, setShow] = useState(false);
-    const [error, setError] = useState('');
-    const [shake, setShake] = useState(false);
-
-    const handleSubmit = (e) => {
-        e.preventDefault();
-        if (input === DOCTOR_PASSWORD) {
-            onUnlock();
-        } else {
-            setError('Incorrect password. Please try again.');
-            setShake(true);
-            setInput('');
-            setTimeout(() => setShake(false), 600);
-        }
+// Flatten a populated API appointment into the shape this panel renders.
+const normalizeAppt = (a) => {
+    const d = a.scheduledAt ? new Date(a.scheduledAt) : null;
+    const valid = d && !Number.isNaN(d.getTime());
+    return {
+        id: a._id,
+        status: a.status, // lowercase API enum
+        scheduledAt: a.scheduledAt,
+        date: valid ? d.toLocaleDateString('en-CA') : '', // YYYY-MM-DD (local)
+        day: valid ? WEEKDAY_NAMES[d.getDay()] : '',
+        time: a.slot || (valid ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''),
+        doctorName: a.doctor?.user?.name || 'Doctor',
+        category: a.category || a.doctor?.specialty || '',
+        hospital: a.location?.address || '',
+        patientName: a.patient?.name || '',
+        userEmail: a.patient?.email || '',
+        patientReason: a.reason || '',
+        consultationFee: a.consultationFee,
     };
+};
 
+// Turn an API error into a clear message, calling out 403/404/409 explicitly.
+const describeError = (e, fallback) => {
+    const status = e?.response?.status;
+    const serverMsg = e?.response?.data?.message;
+    if (status === 403) return serverMsg || 'You are not authorized to perform this action.';
+    if (status === 404) return serverMsg || 'Appointment not found — it may have been removed.';
+    if (status === 409) return serverMsg || 'This conflicts with the current state of the appointment.';
+    return apiErrorMessage(e, fallback);
+};
+
+// ─── Not Authorized State ─────────────────────────────────────────────────────
+function NotAuthorized() {
     return (
-        <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            minHeight: 'calc(100vh - 85px)', padding: 24,
-        }}>
-            <div style={{
-                background: 'white',
-                borderRadius: 20,
-                boxShadow: '0 20px 60px rgba(21,101,192,0.15)',
-                padding: '48px 40px',
-                width: '100%',
-                maxWidth: 420,
-                textAlign: 'center',
-                animation: shake ? 'shakeX 0.5s ease' : 'none',
-            }}>
-                <div style={{
-                    width: 72, height: 72,
-                    background: 'linear-gradient(135deg, #0D47A1, #0277BD)',
-                    borderRadius: 20,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    margin: '0 auto 20px',
-                    boxShadow: '0 8px 24px rgba(21,101,192,0.35)',
-                }}>
-                    <Lock size={32} color="white" />
-                </div>
-                <h2 style={{ fontSize: 22, fontWeight: 800, color: '#0D47A1', marginBottom: 6 }}>
-                    Doctor Panel
-                </h2>
-                <p style={{ fontSize: 14, color: '#64748B', marginBottom: 32 }}>
-                    This area is restricted to authorised medical staff.<br />
-                    Please enter the doctor password to continue.
-                </p>
-                <form onSubmit={handleSubmit}>
-                    <div style={{ position: 'relative', marginBottom: 16 }}>
-                        <input
-                            type={show ? 'text' : 'password'}
-                            value={input}
-                            onChange={e => { setInput(e.target.value); setError(''); }}
-                            placeholder="Enter doctor password"
-                            autoFocus
-                            style={{
-                                width: '100%', padding: '14px 48px 14px 16px',
-                                border: `2px solid ${error ? '#EF5350' : '#E0E7FF'}`,
-                                borderRadius: 12, fontSize: 15, outline: 'none',
-                                color: '#1E293B', background: '#F8FAFF', fontFamily: 'inherit',
-                            }}
-                        />
-                        <button type="button" onClick={() => setShow(s => !s)} style={{
-                            position: 'absolute', right: 14, top: '50%',
-                            transform: 'translateY(-50%)', background: 'none',
-                            border: 'none', cursor: 'pointer', color: '#64748B', display: 'flex',
-                        }}>
-                            {show ? <EyeOff size={18} /> : <Eye size={18} />}
-                        </button>
-                    </div>
-                    {error && (
-                        <div style={{
-                            background: '#FFEBEE', color: '#C62828', borderRadius: 8,
-                            padding: '10px 14px', fontSize: 13, marginBottom: 16, border: '1px solid #EF9A9A',
-                        }}>
-                            {error}
-                        </div>
-                    )}
-                    <button type="submit" style={{
-                        width: '100%', padding: '14px',
-                        background: 'linear-gradient(135deg, #0D47A1, #1976D2)',
-                        color: 'white', border: 'none', borderRadius: 12, fontSize: 15,
-                        fontWeight: 700, cursor: 'pointer', display: 'flex',
-                        alignItems: 'center', justifyContent: 'center', gap: 8,
-                        boxShadow: '0 4px 16px rgba(21,101,192,0.4)', fontFamily: 'inherit',
-                    }}>
-                        <ShieldCheck size={18} /> Unlock Doctor Panel
-                    </button>
-                </form>
+        <div>
+            <div className="page-header">
+                <h1>Doctor Panel</h1>
+                <p>Review appointments and view patient history</p>
             </div>
-            <style>{`
-                @keyframes shakeX {
-                    0%,100%{transform:translateX(0)} 20%{transform:translateX(-10px)}
-                    40%{transform:translateX(10px)} 60%{transform:translateX(-8px)} 80%{transform:translateX(8px)}
-                }
-            `}</style>
+            <div className="page-body">
+                <div className="card">
+                    <div className="empty-state">
+                        <div style={{
+                            width: 72, height: 72, margin: '0 auto 16px',
+                            background: 'linear-gradient(135deg, #C62828, #EF5350)',
+                            borderRadius: 20, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            boxShadow: '0 8px 24px rgba(198,40,40,0.3)',
+                        }}>
+                            <ShieldAlert size={32} color="white" />
+                        </div>
+                        <h3>Not Authorized</h3>
+                        <p>This area is restricted to medical staff. Please sign in with a doctor account to access the panel.</p>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 }
@@ -124,18 +80,27 @@ function PrescriptionModal({ appt, onClose, onSaved }) {
     const [notes, setNotes] = useState('');
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [error, setError] = useState('');
 
     const handleSave = async () => {
         if (!medicine.trim()) return;
         setSaving(true);
+        setError('');
         try {
-            await updateDoc(doc(db, 'Appointments', appt.id), {
-                prescription: { medicine: medicine.trim(), dosage: dosage.trim(), notes: notes.trim() }
+            await prescriptionService.create(appt.id, {
+                medicines: [{
+                    name: medicine.trim(),
+                    ...(dosage.trim() ? { dosage: dosage.trim() } : {}),
+                }],
+                ...(notes.trim() ? { notes: notes.trim() } : {}),
             });
             setSaved(true);
             setTimeout(() => { onSaved && onSaved(); onClose(); }, 1200);
-        } catch (e) { console.error(e); }
-        finally { setSaving(false); }
+        } catch (e) {
+            setError(describeError(e, 'Could not save prescription.'));
+        } finally {
+            setSaving(false);
+        }
     };
 
     if (!appt) return null;
@@ -154,7 +119,7 @@ function PrescriptionModal({ appt, onClose, onSaved }) {
                 </div>
                 <div className="modal-body">
                     <p style={{ fontSize: 13, color: '#64748B', marginBottom: 16 }}>
-                        For: <strong>{appt.patientName}</strong> · {appt.patientAge && `Age ${appt.patientAge} · `}{appt.patientGender}
+                        For: <strong>{appt.patientName}</strong>
                     </p>
                     {saved ? (
                         <div style={{ textAlign: 'center', padding: 20 }}>
@@ -165,7 +130,7 @@ function PrescriptionModal({ appt, onClose, onSaved }) {
                         <>
                             <div style={{ marginBottom: 14 }}>
                                 <label style={{ fontSize: 12, fontWeight: 700, color: '#64748B', display: 'block', marginBottom: 6, textTransform: 'uppercase' }}>Medicine *</label>
-                                <input type="text" value={medicine} onChange={e => setMedicine(e.target.value)}
+                                <input type="text" value={medicine} onChange={e => { setMedicine(e.target.value); setError(''); }}
                                     placeholder="e.g. Paracetamol 500mg" style={inputStyle} />
                             </div>
                             <div style={{ marginBottom: 14 }}>
@@ -179,6 +144,14 @@ function PrescriptionModal({ appt, onClose, onSaved }) {
                                     placeholder="Additional instructions for the patient..." rows={3}
                                     style={{ ...inputStyle, resize: 'vertical' }} />
                             </div>
+                            {error && (
+                                <div style={{
+                                    background: '#FFEBEE', color: '#C62828', borderRadius: 8,
+                                    padding: '10px 12px', fontSize: 13, marginBottom: 12, border: '1px solid #EF9A9A',
+                                }}>
+                                    {error}
+                                </div>
+                            )}
                             <div className="modal-actions">
                                 <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving || !medicine.trim()}>
                                     {saving ? 'Saving…' : '💾 Save Prescription'}
@@ -195,7 +168,7 @@ function PrescriptionModal({ appt, onClose, onSaved }) {
 
 // ─── History Card ─────────────────────────────────────────────────────────────
 function HistoryCard({ appt }) {
-    const isApproved = appt.status === 'Approved';
+    const isApproved = appt.status === 'approved';
     return (
         <div style={{
             background: 'white', borderRadius: 14, padding: '18px 20px',
@@ -219,10 +192,7 @@ function HistoryCard({ appt }) {
                         <div>
                             <div style={{ fontWeight: 700, fontSize: 14, color: '#1E293B' }}>{appt.patientName}</div>
                             <div style={{ fontSize: 12, color: '#64748B' }}>
-                                {appt.patientAge && `Age: ${appt.patientAge}`}
-                                {appt.patientAge && appt.patientGender && ' · '}
-                                {appt.patientGender}
-                                {appt.patientPhone && ` · 📞 ${appt.patientPhone}`}
+                                {appt.userEmail}
                             </div>
                         </div>
                     </div>
@@ -253,7 +223,7 @@ function HistoryCard({ appt }) {
                         display: 'flex', alignItems: 'center', gap: 5,
                     }}>
                         {isApproved ? <CheckCircle size={13} /> : <XCircle size={13} />}
-                        {appt.status}
+                        {titleCase(appt.status)}
                     </span>
                     <div style={{ marginTop: 6, fontSize: 11, color: '#94A3B8', textAlign: 'center' }}>
                         {appt.category}
@@ -266,74 +236,99 @@ function HistoryCard({ appt }) {
 
 // ─── Main Doctor Panel ────────────────────────────────────────────────────────
 export default function DoctorPanel() {
-    const [unlocked, setUnlocked] = useState(false);
+    const { user } = useAuth();
+    const isAuthorized = !!user && (user.role === 'doctor' || user.role === 'admin');
+
     const [tab, setTab] = useState('pending'); // 'pending' | 'history'
-    const [pending, setPending] = useState([]);
-    const [history, setHistory] = useState([]);
-    const [loadingPending, setLoadingPending] = useState(true);
-    const [loadingHistory, setLoadingHistory] = useState(true);
+    const [appts, setAppts] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [error, setError] = useState('');
+    const [actionError, setActionError] = useState('');
     const [approving, setApproving] = useState({});
     const [rejecting, setRejecting] = useState({});
     const [historyFilter, setHistoryFilter] = useState('All'); // 'All' | 'Approved' | 'Rejected'
     const [prescriptionTarget, setPrescriptionTarget] = useState(null); // appointment obj for prescription modal
     const [categoryFilter, setCategoryFilter] = useState('All'); // category filter for pending tab
 
+    // Fetch this doctor's appointments (role-aware GET /api/appointments).
+    const load = useCallback(async ({ silent = false } = {}) => {
+        if (silent) setRefreshing(true); else setLoading(true);
+        setError('');
+        try {
+            const { appointments } = await appointmentService.list({ limit: 50 });
+            setAppts((appointments || []).map(normalizeAppt));
+        } catch (e) {
+            setError(apiErrorMessage(e, 'Could not load appointments'));
+        } finally {
+            if (silent) setRefreshing(false); else setLoading(false);
+        }
+    }, []);
+
+    // Initial load (only for authorized doctors/admins).
     useEffect(() => {
-        if (!unlocked) return;
+        if (isAuthorized) load();
+    }, [isAuthorized, load]);
 
-        // Pending listener
-        const qPending = query(collection(db, 'Appointments'), where('status', '==', 'Pending'));
-        const unsubPending = onSnapshot(qPending, snap => {
-            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            docs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
-            setPending(docs);
-            setLoadingPending(false);
-        }, () => setLoadingPending(false));
-
-        // History listener (Approved + Rejected)
-        const qHistory = query(collection(db, 'Appointments'),
-            where('status', 'in', ['Approved', 'Rejected']));
-        const unsubHistory = onSnapshot(qHistory, snap => {
-            const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-            docs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
-            setHistory(docs);
-            setLoadingHistory(false);
-        }, () => setLoadingHistory(false));
-
-        return () => { unsubPending(); unsubHistory(); };
-    }, [unlocked]);
+    // Refetch when the window regains focus. NOTE: the live Firestore onSnapshot
+    // listeners are intentionally replaced by fetch-on-mount + a Refresh button +
+    // refocus refresh (same pattern as AppointmentHistory).
+    useEffect(() => {
+        if (!isAuthorized) return;
+        const onFocus = () => load({ silent: true });
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, [isAuthorized, load]);
 
     const handleApprove = async (id) => {
         setApproving(p => ({ ...p, [id]: true }));
-        try { await updateDoc(doc(db, 'Appointments', id), { status: 'Approved' }); }
-        catch (err) { console.error(err); }
-        finally { setApproving(p => ({ ...p, [id]: false })); }
+        setActionError('');
+        try {
+            await appointmentService.updateStatus(id, 'approved');
+            await load({ silent: true });
+        } catch (e) {
+            setActionError(describeError(e, 'Could not approve appointment.'));
+        } finally {
+            setApproving(p => ({ ...p, [id]: false }));
+        }
     };
 
     const handleReject = async (id) => {
         setRejecting(p => ({ ...p, [id]: true }));
-        try { await updateDoc(doc(db, 'Appointments', id), { status: 'Rejected' }); }
-        catch (err) { console.error(err); }
-        finally { setRejecting(p => ({ ...p, [id]: false })); }
+        setActionError('');
+        try {
+            await appointmentService.updateStatus(id, 'rejected');
+            await load({ silent: true });
+        } catch (e) {
+            setActionError(describeError(e, 'Could not reject appointment.'));
+        } finally {
+            setRejecting(p => ({ ...p, [id]: false }));
+        }
     };
+
+    // Gate the panel by JWT role. Hooks above always run; redirects/states below.
+    if (!user) return <Navigate to="/" replace />;
+    if (!isAuthorized) return <NotAuthorized />;
+
+    // Split the doctor's appointments into the two buckets the panel shows.
+    const pending = appts.filter(a => a.status === 'pending');
+    const history = appts.filter(a => a.status === 'approved' || a.status === 'rejected');
 
     const filteredHistory = historyFilter === 'All'
         ? history
-        : history.filter(a => a.status === historyFilter);
+        : history.filter(a => a.status === historyFilter.toLowerCase());
 
     // Pending: filtered by category
     const pendingCategories = ['All', ...Array.from(new Set(pending.map(a => a.category).filter(Boolean))).sort()];
     const filteredPending = categoryFilter === 'All' ? pending : pending.filter(a => a.category === categoryFilter);
 
     // Stats for progress bar
+    const approvedCount = history.filter(a => a.status === 'approved').length;
+    const rejectedCount = history.filter(a => a.status === 'rejected').length;
     const totalHandled = pending.length + history.length;
-    const approvedCount = history.filter(a => a.status === 'Approved').length;
-    const rejectedCount = history.filter(a => a.status === 'Rejected').length;
     const approvedPct = totalHandled > 0 ? Math.round((approvedCount / totalHandled) * 100) : 0;
     const rejectedPct = totalHandled > 0 ? Math.round((rejectedCount / totalHandled) * 100) : 0;
     const pendingPct = totalHandled > 0 ? Math.round((pending.length / totalHandled) * 100) : 0;
-
-    if (!unlocked) return <PasswordGate onUnlock={() => setUnlocked(true)} />;
 
     const TAB_STYLE = (active) => ({
         padding: '10px 24px', borderRadius: 10, border: 'none',
@@ -354,28 +349,42 @@ export default function DoctorPanel() {
                 />
             )}
             <div className="page-header">
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
                     <div>
                         <h1>Doctor Panel</h1>
                         <p>Review appointments and view patient history</p>
                     </div>
-                    <button onClick={() => setUnlocked(false)} style={{
-                        background: '#F1F5F9', color: '#64748B', border: '1px solid #E2E8F0',
-                        borderRadius: 8, padding: '7px 14px', fontSize: 13, fontWeight: 600,
-                        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, fontFamily: 'inherit',
-                    }}>
-                        <Lock size={14} /> Lock Panel
+                    <button
+                        className="btn btn-outline btn-sm"
+                        onClick={() => load({ silent: true })}
+                        disabled={loading || refreshing}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                    >
+                        <RefreshCw size={14} style={refreshing ? { animation: 'spin 0.8s linear infinite' } : undefined} />
+                        {refreshing ? 'Refreshing…' : 'Refresh'}
                     </button>
                 </div>
             </div>
 
             <div className="page-body">
+                {/* Action error banner */}
+                {actionError && (
+                    <div style={{
+                        background: '#FFEBEE', border: '1px solid #EF9A9A', borderRadius: 10,
+                        padding: '12px 16px', marginBottom: 16, color: '#C62828', fontSize: 13,
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                    }}>
+                        <span>{actionError}</span>
+                        <button className="btn btn-outline btn-sm" onClick={() => setActionError('')}>Dismiss</button>
+                    </div>
+                )}
+
                 {/* Stats Banner */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 16, marginBottom: 16 }}>
                     {[
                         { label: 'Pending', value: pending.length, color: '#F57C00', bg: '#FFF8E1', icon: '⏳' },
-                        { label: 'Approved', value: history.filter(a => a.status === 'Approved').length, color: '#2E7D32', bg: '#E8F5E9', icon: '✓' },
-                        { label: 'Rejected', value: history.filter(a => a.status === 'Rejected').length, color: '#C62828', bg: '#FFEBEE', icon: '✗' },
+                        { label: 'Approved', value: approvedCount, color: '#2E7D32', bg: '#E8F5E9', icon: '✓' },
+                        { label: 'Rejected', value: rejectedCount, color: '#C62828', bg: '#FFEBEE', icon: '✗' },
                         { label: 'Total Treated', value: history.length, color: '#0277BD', bg: '#E1F5FE', icon: '🏥' },
                     ].map(stat => (
                         <div key={stat.label} style={{ background: stat.bg, borderRadius: 14, padding: '18px 20px', display: 'flex', alignItems: 'center', gap: 14 }}>
@@ -420,9 +429,16 @@ export default function DoctorPanel() {
                     </button>
                 </div>
 
+                {error && (
+                    <div style={{ background: '#FFEBEE', border: '1px solid #EF9A9A', borderRadius: 10, padding: '12px 16px', marginBottom: 20, color: '#C62828', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                        <span>Error: {error}</span>
+                        <button className="btn btn-outline btn-sm" onClick={() => load()}>Retry</button>
+                    </div>
+                )}
+
                 {/* ─── PENDING TAB ─── */}
                 {tab === 'pending' && (
-                    loadingPending ? (
+                    loading ? (
                         <div className="loading-container"><div className="loading-spinner" /><p>Loading...</p></div>
                     ) : (
                         <div>
@@ -477,9 +493,6 @@ export default function DoctorPanel() {
                                                             <div style={{ fontWeight: 700, fontSize: 15, color: '#1E293B' }}>{appt.patientName}</div>
                                                             <div style={{ fontSize: 12, color: '#64748B' }}>
                                                                 {appt.userEmail}
-                                                                {appt.patientAge && ` · Age: ${appt.patientAge}`}
-                                                                {appt.patientGender && ` · ${appt.patientGender}`}
-                                                                {appt.patientPhone && ` · 📞 ${appt.patientPhone}`}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -555,12 +568,12 @@ export default function DoctorPanel() {
                                         : '#64748B',
                                 }}>
                                     {f === 'Approved' ? '✓ ' : f === 'Rejected' ? '✗ ' : ''}{f}
-                                    {f === 'All' ? ` (${history.length})` : ` (${history.filter(a => a.status === f).length})`}
+                                    {f === 'All' ? ` (${history.length})` : ` (${history.filter(a => a.status === f.toLowerCase()).length})`}
                                 </button>
                             ))}
                         </div>
 
-                        {loadingHistory ? (
+                        {loading ? (
                             <div className="loading-container"><div className="loading-spinner" /><p>Loading history...</p></div>
                         ) : filteredHistory.length === 0 ? (
                             <div className="card">
@@ -575,12 +588,12 @@ export default function DoctorPanel() {
                                 {filteredHistory.map(appt => (
                                     <div key={appt.id}>
                                         <HistoryCard appt={appt} />
-                                        {appt.status === 'Approved' && (
+                                        {appt.status === 'approved' && (
                                             <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
                                                 <button
                                                     onClick={() => setPrescriptionTarget(appt)}
                                                     style={{
-                                                        background: appt.prescription ? '#E8F5E9' : '#F0FDF4',
+                                                        background: '#F0FDF4',
                                                         color: '#2E7D32',
                                                         border: '1.5px solid #A5D6A7',
                                                         borderRadius: 8, padding: '6px 14px',
@@ -589,7 +602,7 @@ export default function DoctorPanel() {
                                                     }}
                                                 >
                                                     <FileText size={14} />
-                                                    {appt.prescription ? 'Edit Prescription' : 'Write Prescription'}
+                                                    Write Prescription
                                                 </button>
                                             </div>
                                         )}
