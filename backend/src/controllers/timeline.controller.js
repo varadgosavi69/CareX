@@ -17,6 +17,7 @@ import Appointment from '../models/Appointment.js';
 import Prescription from '../models/Prescription.js';
 import Report from '../models/Report.js';
 import Vital from '../models/Vital.js';
+import LabResult from '../models/LabResult.js';
 
 // ─── Normalizers ──────────────────────────────────────────────────────────────
 
@@ -112,6 +113,30 @@ const normalizeVital = (vital) => {
 };
 
 /**
+ * Normalise a LabResult document into a timeline event.
+ * `date` is recordedAt — when the sample was taken / result was recorded.
+ * `summary` shows testName + value + unit, with reference range if present.
+ */
+const normalizeLabResult = (lab) => {
+  const rangePart = lab.referenceRange ? ` (ref: ${lab.referenceRange})` : '';
+  return {
+    type: 'LabResult',
+    date: lab.recordedAt,
+    summary: `${lab.testName} – ${lab.value} ${lab.unit}${rangePart}`,
+    refId: lab._id,
+    meta: {
+      testName: lab.testName,
+      value: lab.value,
+      unit: lab.unit,
+      referenceRange: lab.referenceRange ?? null,
+      labName: lab.labName ?? null,
+      notes: lab.notes ?? null,
+      recordedBy: lab.recordedBy ?? null,
+    },
+  };
+};
+
+/**
  * Fetch and normalise all appointments for `patientId`.
  * Returns an array of normalised timeline events sorted by date.
  */
@@ -162,6 +187,19 @@ const fetchVitals = async (patientId) => {
   return docs.map(normalizeVital);
 };
 
+/**
+ * Fetch and normalise all lab results for `patientId`.
+ * recordedBy is populated for display on the timeline card.
+ */
+const fetchLabResults = async (patientId) => {
+  const docs = await LabResult.find({ patientId })
+    .populate('recordedBy', 'name email role')
+    .sort({ recordedAt: -1 })
+    .lean();
+
+  return docs.map(normalizeLabResult);
+};
+
 // ─── Controller ───────────────────────────────────────────────────────────────
 
 /**
@@ -176,9 +214,10 @@ export const getTimeline = asyncHandler(async (req, res) => {
   const prescriptions = await fetchPrescriptions(patientId);
   const reports       = await fetchReports(patientId);
   const vitals        = await fetchVitals(patientId);
+  const labResults    = await fetchLabResults(patientId);
 
-  // Step 5 will add lab results; Step 6 merges and sorts everything.
-  const timeline = [...appointments, ...prescriptions, ...reports, ...vitals];
+  // Step 6 will merge and sort everything chronologically.
+  const timeline = [...appointments, ...prescriptions, ...reports, ...vitals, ...labResults];
 
   sendSuccess(res, {
     message: 'Patient timeline fetched.',
