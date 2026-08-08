@@ -12,6 +12,7 @@ import profileRoutes from './profile.routes.js';
 import paymentRoutes from './payment.routes.js';
 import vitalRoutes from './vital.routes.js';
 import labResultRoutes from './labResult.routes.js';
+import timelineRoutes from './timeline.routes.js';
 
 const router = Router();
 
@@ -25,5 +26,6 @@ router.use('/profile', profileRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/vitals', vitalRoutes);
 router.use('/lab-results', labResultRoutes);
+router.use('/timeline', timelineRoutes);
 
 export default router;
