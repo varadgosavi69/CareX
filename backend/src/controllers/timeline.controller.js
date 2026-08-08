@@ -204,20 +204,36 @@ const fetchLabResults = async (patientId) => {
 
 /**
  * GET /api/timeline/:patientId
- * Returns the unified patient timeline (appointments only in this step).
+ * Returns the unified patient timeline sorted newest → oldest.
+ * All five sources are fetched concurrently then merged into one list.
  * Auth: doctor | admin
  */
 export const getTimeline = asyncHandler(async (req, res) => {
   const { patientId } = req.params;
 
-  const appointments  = await fetchAppointments(patientId);
-  const prescriptions = await fetchPrescriptions(patientId);
-  const reports       = await fetchReports(patientId);
-  const vitals        = await fetchVitals(patientId);
-  const labResults    = await fetchLabResults(patientId);
+  // Fetch all sources concurrently — no inter-dependency between them.
+  const [appointments, prescriptions, reports, vitals, labResults] =
+    await Promise.all([
+      fetchAppointments(patientId),
+      fetchPrescriptions(patientId),
+      fetchReports(patientId),
+      fetchVitals(patientId),
+      fetchLabResults(patientId),
+    ]);
 
-  // Step 6 will merge and sort everything chronologically.
-  const timeline = [...appointments, ...prescriptions, ...reports, ...vitals, ...labResults];
+  // Merge all five arrays then sort by date descending (newest event first).
+  // Events with a missing/null date are pushed to the end.
+  const timeline = [
+    ...appointments,
+    ...prescriptions,
+    ...reports,
+    ...vitals,
+    ...labResults,
+  ].sort((a, b) => {
+    const da = a.date ? new Date(a.date).getTime() : 0;
+    const db = b.date ? new Date(b.date).getTime() : 0;
+    return db - da; // descending
+  });
 
   sendSuccess(res, {
     message: 'Patient timeline fetched.',
