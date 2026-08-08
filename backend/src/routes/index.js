@@ -10,6 +10,8 @@ import ratingRoutes from './rating.routes.js';
 import reportRoutes from './report.routes.js';
 import profileRoutes from './profile.routes.js';
 import paymentRoutes from './payment.routes.js';
+import vitalRoutes from './vital.routes.js';
+import labResultRoutes from './labResult.routes.js';
 
 const router = Router();
 
@@ -21,5 +23,7 @@ router.use('/ratings', ratingRoutes);
 router.use('/reports', reportRoutes);
 router.use('/profile', profileRoutes);
 router.use('/payments', paymentRoutes);
+router.use('/vitals', vitalRoutes);
+router.use('/lab-results', labResultRoutes);
 
 export default router;
