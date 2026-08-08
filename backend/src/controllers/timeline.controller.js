@@ -15,6 +15,7 @@ import asyncHandler from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/ApiResponse.js';
 import Appointment from '../models/Appointment.js';
 import Prescription from '../models/Prescription.js';
+import Report from '../models/Report.js';
 
 // ─── Normalizers ──────────────────────────────────────────────────────────────
 
@@ -65,7 +66,22 @@ const normalizePrescription = (rx) => {
   };
 };
 
-// ─── Fetchers (one per source, composed in Step 6) ───────────────────────────
+/**
+ * Normalise a Report document into a timeline event.
+ * `date` is uploadedAt (the createdAt alias set on the Report schema).
+ */
+const normalizeReport = (report) => ({
+  type: 'Report',
+  date: report.uploadedAt,
+  summary: `Report uploaded – ${report.fileName ?? report.fileType ?? 'document'}`,
+  refId: report._id,
+  meta: {
+    fileName: report.fileName ?? null,
+    fileType: report.fileType ?? null,
+    fileUrl: report.fileUrl,
+    appointmentId: report.appointment ?? null,
+  },
+});
 
 /**
  * Fetch and normalise all appointments for `patientId`.
@@ -93,6 +109,18 @@ const fetchPrescriptions = async (patientId) => {
   return docs.map(normalizePrescription);
 };
 
+/**
+ * Fetch and normalise all uploaded reports for `patientId`.
+ * Sorted by uploadedAt descending (newest first before the final merge sort).
+ */
+const fetchReports = async (patientId) => {
+  const docs = await Report.find({ patient: patientId })
+    .sort({ uploadedAt: -1 })
+    .lean();
+
+  return docs.map(normalizeReport);
+};
+
 // ─── Controller ───────────────────────────────────────────────────────────────
 
 /**
@@ -105,9 +133,10 @@ export const getTimeline = asyncHandler(async (req, res) => {
 
   const appointments  = await fetchAppointments(patientId);
   const prescriptions = await fetchPrescriptions(patientId);
+  const reports       = await fetchReports(patientId);
 
-  // Steps 3-5 will add more sources here; Step 6 merges and sorts everything.
-  const timeline = [...appointments, ...prescriptions];
+  // Steps 4-5 will add more sources here; Step 6 merges and sorts everything.
+  const timeline = [...appointments, ...prescriptions, ...reports];
 
   sendSuccess(res, {
     message: 'Patient timeline fetched.',
