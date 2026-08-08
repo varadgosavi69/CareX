@@ -14,6 +14,7 @@
 import asyncHandler from '../utils/asyncHandler.js';
 import { sendSuccess } from '../utils/ApiResponse.js';
 import Appointment from '../models/Appointment.js';
+import Prescription from '../models/Prescription.js';
 
 // ─── Normalizers ──────────────────────────────────────────────────────────────
 
@@ -37,6 +38,33 @@ const normalizeAppointment = (appt) => ({
   },
 });
 
+/**
+ * Normalise a Prescription document into a timeline event.
+ * `date` is createdAt — when the prescription was written.
+ * `summary` lists the first medicine name (plus count if there are more).
+ */
+const normalizePrescription = (rx) => {
+  const [first, ...rest] = rx.medicines ?? [];
+  const medicineSummary = first
+    ? rest.length > 0
+      ? `${first.name} +${rest.length} more`
+      : first.name
+    : 'No medicines listed';
+
+  return {
+    type: 'Prescription',
+    date: rx.createdAt,
+    summary: `Prescription – ${medicineSummary}`,
+    refId: rx._id,
+    meta: {
+      medicines: rx.medicines ?? [],
+      notes: rx.notes ?? null,
+      appointmentId: rx.appointment ?? null,
+      doctor: rx.doctor ?? null,
+    },
+  };
+};
+
 // ─── Fetchers (one per source, composed in Step 6) ───────────────────────────
 
 /**
@@ -52,6 +80,19 @@ const fetchAppointments = async (patientId) => {
   return docs.map(normalizeAppointment);
 };
 
+/**
+ * Fetch and normalise all prescriptions for `patientId`.
+ * Prescriptions are linked to a patient directly; doctor is populated for display.
+ */
+const fetchPrescriptions = async (patientId) => {
+  const docs = await Prescription.find({ patient: patientId })
+    .populate({ path: 'doctor', populate: { path: 'user', select: 'name email' } })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  return docs.map(normalizePrescription);
+};
+
 // ─── Controller ───────────────────────────────────────────────────────────────
 
 /**
@@ -62,10 +103,11 @@ const fetchAppointments = async (patientId) => {
 export const getTimeline = asyncHandler(async (req, res) => {
   const { patientId } = req.params;
 
-  const appointments = await fetchAppointments(patientId);
+  const appointments  = await fetchAppointments(patientId);
+  const prescriptions = await fetchPrescriptions(patientId);
 
-  // Steps 2-5 will add more sources here; Step 6 merges and sorts everything.
-  const timeline = [...appointments];
+  // Steps 3-5 will add more sources here; Step 6 merges and sorts everything.
+  const timeline = [...appointments, ...prescriptions];
 
   sendSuccess(res, {
     message: 'Patient timeline fetched.',
