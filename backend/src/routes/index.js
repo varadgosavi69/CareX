@@ -14,6 +14,7 @@ import vitalRoutes from './vital.routes.js';
 import labResultRoutes from './labResult.routes.js';
 import timelineRoutes from './timeline.routes.js';
 import riskRoutes from './risk.routes.js';
+import notesAnalysisRoutes from './notesAnalysis.routes.js';
 
 const router = Router();
 
@@ -29,5 +30,6 @@ router.use('/vitals', vitalRoutes);
 router.use('/lab-results', labResultRoutes);
 router.use('/timeline', timelineRoutes);
 router.use('/risk', riskRoutes);
+router.use('/notes-analysis', notesAnalysisRoutes);
 
 export default router;
