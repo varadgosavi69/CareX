@@ -54,6 +54,10 @@ export const env = {
     accessExpiry: optional('JWT_ACCESS_EXPIRY', '15m'),
     refreshExpiry: optional('JWT_REFRESH_EXPIRY', '7d'),
   },
+
+  // Gemini AI — optional; if absent the summary endpoint returns a graceful error.
+  // Required in production; optional in test/dev so tests can mock without a real key.
+  geminiApiKey: optional('GEMINI_API_KEY', ''),
 };
 
 export default env;
